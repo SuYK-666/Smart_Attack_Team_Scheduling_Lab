@@ -1,0 +1,25 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "deepseek/deepseek-v4-flash",
+  "permission": {
+    "*": "allow",
+    "bash": "allow",
+    "edit": "allow",
+    "write": "allow",
+    "read": "allow",
+    "external_directory": "allow",
+    "question": "allow",
+    "plan_enter": "allow",
+    "plan_exit": "allow",
+    "skill": "allow",
+    "webfetch": "allow",
+    "websearch": "allow"
+  },
+  "provider": {
+    "deepseek": {
+      "options": {
+        "timeout": 600000
+      }
+    }
+  }
+}

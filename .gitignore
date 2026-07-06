@@ -1,0 +1,6 @@
+node_modules/
+.pen-agent/
+logs/
+*.log
+proxy/proxy-client
+proxy/build/
