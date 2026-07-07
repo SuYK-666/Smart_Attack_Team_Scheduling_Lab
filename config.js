@@ -17,6 +17,9 @@ function parseArgs() {
     opencodeAuto: true,
     attachUrl: "http://localhost:4096",
     workDir: __dirname,
+    artifactDir: null,
+    minLoops: 3,
+    stopAfterStale: 2,
     proxyPort: 9999,
     flagPattern: /flag\{[^}]+\}|Flag\{[^}]+\}|CTF\{[^}]+\}/g,
   };
@@ -55,6 +58,15 @@ function parseArgs() {
       case "--work-dir":
         config.workDir = resolve(args[++i]);
         break;
+      case "--artifact-dir":
+        config.artifactDir = resolve(args[++i]);
+        break;
+      case "--min-loops":
+        config.minLoops = parseInt(args[++i], 10);
+        break;
+      case "--stop-after-stale":
+        config.stopAfterStale = parseInt(args[++i], 10);
+        break;
       case "--pattern":
         config.flagPattern = new RegExp(args[++i], "g");
         break;
@@ -76,6 +88,9 @@ function parseArgs() {
   }
 
   config.target = `${config.targetHost}:${config.targetPort}`;
+  if (!config.artifactDir) {
+    config.artifactDir = resolve(config.workDir, "artifacts");
+  }
 
   return config;
 }
@@ -95,7 +110,10 @@ Options:
   -k, --key <key>     API key for the model provider
   --attach <url>       OpenCode backend URL (default: http://localhost:4096)
   --max-loops <n>     Max agent loop iterations (default: 50)
+  --min-loops <n>     Minimum loops before stale-stop is allowed (default: 3)
+  --stop-after-stale <n> Stop after N loops with no new findings (default: 2)
   --proxy-port <n>    Proxy server port for lateral movement (default: 9999)
+  --artifact-dir <path> Directory for generated scripts/payloads/artifacts (default: ./artifacts)
   --pattern <regex>   Custom flag regex pattern
   --no-auto           Disable auto-approve permissions
   --work-dir <path>   Working directory (default: pen-agent dir)
@@ -112,6 +130,14 @@ function validate(config) {
     console.error("Error: --max-loops must be at least 1");
     return false;
   }
+  if (config.minLoops < 1) {
+    console.error("Error: --min-loops must be at least 1");
+    return false;
+  }
+  if (config.stopAfterStale < 1) {
+    console.error("Error: --stop-after-stale must be at least 1");
+    return false;
+  }
   return true;
 }
 
@@ -126,6 +152,9 @@ function dump(config) {
   console.log(`  Auto approve:    ${config.opencodeAuto}`);
   console.log(`  Flag pattern:    ${config.flagPattern}`);
   console.log(`  Work dir:        ${config.workDir}`);
+  console.log(`  Artifact dir:    ${config.artifactDir}`);
+  console.log(`  Min loops:       ${config.minLoops}`);
+  console.log(`  Stale stop:      ${config.stopAfterStale}`);
   console.log("=======================\n");
 }
 

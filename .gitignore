@@ -2,5 +2,7 @@ node_modules/
 .pen-agent/
 logs/
 *.log
+artifacts/
+artifact-archive/
 proxy/proxy-client
 proxy/build/

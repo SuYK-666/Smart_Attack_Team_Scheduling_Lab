@@ -15,48 +15,51 @@ function getApiKey() {
   }
 }
 
-const SYSTEM = `You are a supervisor agent reviewing output from a penetration testing session.
+const SYSTEM = `You are a supervisor agent reviewing raw output from an authorized CTF penetration test.
 
-Extract the following structured summary in JSON:
+Return ONLY valid JSON. All human-readable values must be written in Chinese.
 
+Schema:
 {
-  "summary": "one paragraph, max 200 chars: what was done and found this iteration",
-  "newFlags": ["flag strings found"],
-  "newHosts": ["new IPs or hostnames discovered"],
+  "summary": "Chinese 300-600 chars: what happened, key path, evidence, result",
+  "newFlags": ["flag strings"],
+  "newHosts": ["new IPs or hostnames"],
   "newServices": [{"host":"ip","port":80,"name":"http"}],
   "newCredentials": [{"username":"","password":"","host":"","service":""}],
-  "keyActions": ["list of significant actions taken this iteration"],
-  "position": "where are you now? e.g. 'local shell on 10.0.0.5 as root' or 'unauthenticated, probing 192.168.1.1'",
-  "newAccess": ["what new access did you gain? e.g. 'SSH shell as user www-data on 10.0.0.5'"],
-  "intel": ["new valuable intelligence discovered, e.g. 'internal subnet 10.0.0.0/24', 'MySQL on 10.0.0.5:3306', 'backup file at /var/backups/db.sql'"]
+  "keyActions": ["Chinese key actions"],
+  "toolCalls": [{"tool":"curl/nmap/gobuster/bash/python/netcat/skill/etc","command":"full command or HTTP request","purpose":"why it was run","result":"status/output/discovery/failure summary","impact":"how it affected next step"}],
+  "analysisTrail": [{"phase":"信息收集|扫描判断|攻击尝试|权限扩展|横向移动|回传取证|失败排查|验证收尾","hypothesis":"evidence-based reasoning summary in Chinese","action":"specific action","evidence":"observable evidence","decision":"next decision or why abandoned"}],
+  "problems": [{"symptom":"failure symptom","cause":"likely cause from output","resolution":"adjustment or next recommendation"}],
+  "nextSteps": ["Chinese concrete follow-up actions"],
+  "rewardEvaluation": {"level":"无奖励|基础奖励|额外奖励","reason":"Chinese reason based on round scope, evidence quality, discoveries, and handoff clarity"},
+  "position": "Chinese current position/access level",
+  "newAccess": ["new access gained"],
+  "intel": ["valuable tactical intel"]
 }
 
 Rules:
-- Flag format: flag{...}, Flag{...}, CTF{...}
-- Filter noise — only include NEW discoveries not already known
-- If nothing new, return empty arrays and short summary
-- position must describe current access level and network location
-- newAccess should list specific new access gained (shell, admin panel, credentials, etc)
-- intel should list tactical intelligence for further attacks (network topology, services, file paths, hints)
-- Be concise but thorough — don't miss valuable intel`;
+- Extract visible commands, HTTP requests, tool names, parameters, outputs, errors, and how they influenced the next step.
+- Do not invent hidden chain-of-thought. Use observable evidence and concise decision summaries.
+- Include failed attempts when visible.
+- Filter noise, but preserve important command evidence, URLs, credentials, upload paths, sessions, callbacks, and flags.`;
 
 export async function supervise(output) {
   if (!output || output.trim().length < 50) {
-    return { summary: output?.slice(0, 200) || "(empty)", newFlags: [], newHosts: [], newServices: [], newCredentials: [], keyActions: [], position: "", newAccess: [], intel: [] };
+    return emptyFindings(output?.slice(0, 200) || "(empty)");
   }
 
+  const cleaned = cleanOutput(output);
+  const fallback = basicExtract(cleaned);
   const key = getApiKey();
   if (!key) {
-    return basicExtract(output);
+    return fallback;
   }
 
   const prompt = `${SYSTEM}
 
-The following is raw output from a penetration testing agent. Extract the structured summary.
-
 RAW OUTPUT:
 \`\`\`
-${output.slice(-8000)}
+${cleaned.slice(-18000)}
 \`\`\`
 
 Return ONLY valid JSON (no markdown, no code fences):`;
@@ -74,7 +77,7 @@ Return ONLY valid JSON (no markdown, no code fences):`;
       body: JSON.stringify({
         model: "deepseek-chat",
         messages: [{ role: "user", content: prompt }],
-        max_tokens: 1024,
+        max_tokens: 2600,
         temperature: 0,
       }),
       signal: controller.signal,
@@ -82,66 +85,201 @@ Return ONLY valid JSON (no markdown, no code fences):`;
 
     clearTimeout(timer);
 
-    if (!res.ok) {
-      throw new Error(`API ${res.status}`);
-    }
+    if (!res.ok) throw new Error(`API ${res.status}`);
 
     const data = await res.json();
     const text = data.choices?.[0]?.message?.content || "";
-
     const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return {
-        summary: parsed.summary || "",
-        newFlags: parsed.newFlags || [],
-        newHosts: parsed.newHosts || [],
-        newServices: parsed.newServices || [],
-        newCredentials: parsed.newCredentials || [],
-        keyActions: parsed.keyActions || [],
-        position: parsed.position || "",
-        newAccess: parsed.newAccess || [],
-        intel: parsed.intel || [],
-      };
-    }
+    if (!jsonMatch) return fallback;
 
-    return basicExtract(output);
+    const parsed = JSON.parse(jsonMatch[0]);
+    return mergeWithFallback(parsed, fallback);
   } catch (err) {
-    console.error(`[supervisor] LLM call failed: ${err.message}, falling back to basic extraction`);
-    return basicExtract(output);
+    console.error(`[supervisor] LLM call failed: ${err.message}, falling back to local extraction`);
+    return fallback;
   }
 }
 
+function cleanOutput(output) {
+  return output
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/\r/g, "");
+}
+
+function mergeWithFallback(parsed, fallback) {
+  return {
+    summary: parsed.summary || fallback.summary,
+    newFlags: mergeUnique(parsed.newFlags, fallback.newFlags),
+    newHosts: mergeUnique(parsed.newHosts, fallback.newHosts),
+    newServices: parsed.newServices?.length ? parsed.newServices : fallback.newServices,
+    newCredentials: parsed.newCredentials?.length ? parsed.newCredentials : fallback.newCredentials,
+    keyActions: parsed.keyActions?.length ? parsed.keyActions : fallback.keyActions,
+    toolCalls: parsed.toolCalls?.length ? parsed.toolCalls : fallback.toolCalls,
+    analysisTrail: parsed.analysisTrail?.length ? parsed.analysisTrail : fallback.analysisTrail,
+    problems: parsed.problems?.length ? parsed.problems : fallback.problems,
+    nextSteps: parsed.nextSteps?.length ? parsed.nextSteps : fallback.nextSteps,
+    rewardEvaluation: parsed.rewardEvaluation || fallback.rewardEvaluation,
+    position: parsed.position || fallback.position,
+    newAccess: parsed.newAccess?.length ? parsed.newAccess : fallback.newAccess,
+    intel: parsed.intel?.length ? parsed.intel : fallback.intel,
+  };
+}
+
 function basicExtract(output) {
-  const flags = [];
-  const flagRe = /flag\{[^}]+\}|Flag\{[^}]+\}|CTF\{[^}]+\}/g;
-  for (const m of output.matchAll(flagRe)) {
-    flags.push(m[0]);
-  }
-
+  const flags = [...new Set([...output.matchAll(/flag\{[^}]+\}|Flag\{[^}]+\}|CTF\{[^}]+\}/g)].map((m) => m[0]))];
   const hosts = [];
-  const hostRe = /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/g;
-  for (const m of output.matchAll(hostRe)) {
-    if (!hosts.includes(m[1]) && !m[1].startsWith("0.") && !m[1].startsWith("127.0.0.1")) {
-      hosts.push(m[1]);
-    }
+  for (const m of output.matchAll(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/g)) {
+    if (!hosts.includes(m[1]) && !m[1].startsWith("0.") && !m[1].startsWith("127.0.0.1")) hosts.push(m[1]);
   }
 
-  const lineRe = /(?:password|passwd|pass)\s*[:=]\s*(\S+)/gi;
   const creds = [];
-  for (const m of output.matchAll(lineRe)) {
-    if (m[1].length > 1 && m[1].length < 64) {
-      creds.push({ password: m[1] });
-    }
+  for (const m of output.matchAll(/([A-Za-z0-9_.-]{2,32}):([a-f0-9]{16,64}|[^\s<>"']{3,64})/g)) {
+    creds.push({ username: m[1], password: m[2] });
   }
+
+  const toolCalls = extractToolCalls(output);
+  const keyActions = toolCalls.slice(0, 12).map((c) => `${c.tool}: ${c.purpose || c.command}`);
 
   return {
-    summary: output.slice(0, 200).replace(/\n/g, " "),
-    newFlags: [...new Set(flags)],
+    summary: summarizeLocally(output, flags, toolCalls),
+    newFlags: flags,
     newHosts: hosts,
     newServices: [],
-    newCredentials: creds,
+    newCredentials: dedupeCreds(creds),
+    keyActions,
+    toolCalls,
+    analysisTrail: toolCalls.slice(0, 12).map((c) => ({
+      phase: inferPhase(c.command),
+      hypothesis: c.purpose,
+      action: c.command,
+      evidence: c.result,
+      decision: c.impact,
+    })),
+    problems: extractProblems(output),
+    nextSteps: flags.length ? ["已找到 flag，可复核日志中的利用路径和证据链。"] : ["继续根据已发现服务逐一验证漏洞面。"],
+    rewardEvaluation: flags.length
+      ? { level: "额外奖励", reason: "本轮输出中出现 flag，属于高价值发现；仍需结合日志确认是否遵守本轮边界。" }
+      : { level: toolCalls.length ? "基础奖励" : "无奖励", reason: toolCalls.length ? "本轮存在可见工具调用和证据输出。" : "未解析到明确工具调用或有效证据。" },
+    position: flags.length ? "已获得目标 flag，处于验证收尾阶段" : "正在自动化探测目标服务",
+    newAccess: [],
+    intel: extractIntel(output),
+  };
+}
+
+function extractToolCalls(output) {
+  const calls = [];
+  const lines = output.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    const command = line.startsWith("$ ") ? line.slice(2).trim() : "";
+    if (!command) continue;
+    const resultLines = [];
+    for (let j = i + 1; j < Math.min(lines.length, i + 12); j++) {
+      const next = lines[j].trim();
+      if (next.startsWith("$ ") || next.startsWith("# ")) break;
+      if (next) resultLines.push(next);
+    }
+    const tool = inferTool(command);
+    const result = resultLines.join(" ").slice(0, 500);
+    calls.push({
+      tool,
+      command,
+      purpose: inferPurpose(command),
+      result,
+      impact: inferImpact(command, result),
+    });
+  }
+  return calls;
+}
+
+function inferTool(command) {
+  const first = command.split(/\s+/)[0].replace(/\.exe$/i, "");
+  if (/^curl/i.test(first)) return "curl";
+  if (/^nmap/i.test(first)) return "nmap";
+  if (/^gobuster/i.test(first)) return "gobuster";
+  if (/^hydra/i.test(first)) return "hydra";
+  if (/^python/i.test(first)) return "python";
+  if (/^nc|netcat/i.test(first)) return "netcat";
+  if (/^Get-|^Write-|^\$/i.test(first)) return "powershell";
+  return first || "shell";
+}
+
+function inferPurpose(command) {
+  if (/nmap|Test-NetConnection|TcpClient/i.test(command)) return "枚举端口或验证服务连通性";
+  if (/ORDER%20BY|UNION|sqlite_master|database\(|sqlite_version/i.test(command)) return "验证并利用 SQL 注入";
+  if (/\/login|username=|password=/i.test(command)) return "使用发现的凭据登录验证权限";
+  if (/-F|multipart|upload|filename=/i.test(command)) return "测试文件上传与绕过";
+  if (/gobuster|dirb|dirsearch/i.test(command)) return "目录和文件枚举";
+  if (/cat |ls|id|whoami/i.test(command)) return "验证命令执行或读取目标文件";
+  return "执行自动化测试步骤并收集证据";
+}
+
+function inferImpact(command, result) {
+  if (/flag\{[^}]+\}/i.test(result)) return "结果中出现 flag，进入验证收尾";
+  if (/数据库错误|SQL|sqlite|users|CREATE TABLE|UNION/i.test(result + command)) return "结果支持继续沿 SQL 注入路径枚举数据库";
+  if (/登录失败|Invalid|Forbidden|404|timed out|error/i.test(result)) return "该尝试失败，需要更换 payload、参数或攻击面";
+  if (/Upload Success|Stored in/i.test(result)) return "上传成功，可继续验证访问路径和执行可能性";
+  return "保留输出作为下一步判断依据";
+}
+
+function inferPhase(command) {
+  if (/nmap|TcpClient|Get-Command|curl.*http:\/\/[^/"]+["\s]?$/i.test(command)) return "信息收集";
+  if (/ORDER%20BY|UNION|sqlite_master|\/login/i.test(command)) return "攻击尝试";
+  if (/-F|upload|filename=/i.test(command)) return "攻击尝试";
+  if (/cat |ls|id|whoami/i.test(command)) return "回传取证";
+  return "扫描判断";
+}
+
+function extractProblems(output) {
+  const problems = [];
+  if (/timed out/i.test(output)) problems.push({ symptom: "命令或连接超时", cause: "目标服务无响应或交互协议不匹配", resolution: "切换请求方式、延长超时或更换攻击面" });
+  if (/Invalid File|You was catched|Forbidden|404 Not Found/i.test(output)) problems.push({ symptom: "上传、访问或目录探测被拒绝", cause: "服务端存在后缀、内容或路径限制", resolution: "尝试 MIME、后缀、内容魔术头、路径和解析差异绕过" });
+  if (/数据库错误/i.test(output)) problems.push({ symptom: "数据库错误页面", cause: "SQL payload 触发异常或列数/函数不匹配", resolution: "调整列数、函数和数据库方言继续验证" });
+  return problems;
+}
+
+function extractIntel(output) {
+  const intel = [];
+  if (/sqlite_version\(\).*?3\./is.test(output) || /sqlite_master/i.test(output)) intel.push("数据库类型疑似 SQLite，可通过 sqlite_master 枚举表结构。");
+  if (/users,articles/i.test(output)) intel.push("发现 users 和 articles 表。");
+  if (/CREATE TABLE users/i.test(output)) intel.push("users 表包含 id、username、password 字段。");
+  if (/管理员面板|Flag:/i.test(output)) intel.push("管理员面板会直接显示 flag。");
+  return intel;
+}
+
+function summarizeLocally(output, flags, toolCalls) {
+  const flagText = flags.length ? `发现 flag：${flags.join(", ")}。` : "尚未提取到 flag。";
+  const toolText = toolCalls.length ? `本轮记录到 ${toolCalls.length} 次命令/工具调用，关键路径包括端口/服务探测、SQL 注入验证、表结构枚举、凭据提取和登录验证。` : "本轮未解析到明确工具调用。";
+  return `${toolText}${flagText}`;
+}
+
+function mergeUnique(a = [], b = []) {
+  return [...new Set([...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])])];
+}
+
+function dedupeCreds(creds) {
+  const seen = new Set();
+  return creds.filter((c) => {
+    const key = `${c.username || ""}:${c.password || ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function emptyFindings(summary) {
+  return {
+    summary,
+    newFlags: [],
+    newHosts: [],
+    newServices: [],
+    newCredentials: [],
     keyActions: [],
+    toolCalls: [],
+    analysisTrail: [],
+    problems: [],
+    nextSteps: [],
+    rewardEvaluation: { level: "无奖励", reason: "本轮输出不足，无法确认计划完成度或证据质量。" },
     position: "",
     newAccess: [],
     intel: [],

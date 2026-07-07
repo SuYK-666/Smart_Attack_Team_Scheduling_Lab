@@ -2,6 +2,7 @@
   "name": "pen-agent",
   "version": "0.1.0",
   "description": "Automated penetration testing agent framework using opencode",
+  "license": "MIT",
   "main": "index.js",
   "type": "module",
   "scripts": {

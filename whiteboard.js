@@ -46,6 +46,11 @@ export class Whiteboard {
       services: findings.newServices || [],
       credentials: findings.newCredentials || [],
       actions: findings.keyActions || [],
+      toolCalls: findings.toolCalls || [],
+      analysisTrail: findings.analysisTrail || [],
+      problems: findings.problems || [],
+      nextSteps: findings.nextSteps || [],
+      rewardEvaluation: findings.rewardEvaluation || null,
       position: findings.position || "unknown",
       access: findings.newAccess || [],
       intel: findings.intel || [],
@@ -121,6 +126,19 @@ export class Whiteboard {
       }
       if (iter.access.length) lines.push(`  Access: ${iter.access.join("; ")}`);
       if (iter.intel.length) lines.push(`  Intel: ${iter.intel.join("; ")}`);
+      if (iter.toolCalls?.length) {
+        lines.push(`  Tools: ${iter.toolCalls.map((t) => `${t.tool || "tool"}: ${t.command || ""} => ${t.result || ""}`).join("; ")}`);
+      }
+      if (iter.analysisTrail?.length) {
+        lines.push(`  Analysis: ${iter.analysisTrail.map((a) => `[${a.phase || "?"}] ${a.action || ""} -> ${a.evidence || ""}`).join("; ")}`);
+      }
+      if (iter.problems?.length) {
+        lines.push(`  Problems: ${iter.problems.map((p) => `${p.symptom || "?"}: ${p.resolution || ""}`).join("; ")}`);
+      }
+      if (iter.rewardEvaluation) {
+        lines.push(`  Reward: ${iter.rewardEvaluation.level || "?"}: ${iter.rewardEvaluation.reason || ""}`);
+      }
+      if (iter.nextSteps?.length) lines.push(`  Next: ${iter.nextSteps.join("; ")}`);
     }
     return lines.join("\n");
   }

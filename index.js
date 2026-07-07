@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import chalk from "chalk";
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import os from "node:os";
@@ -21,10 +21,18 @@ async function main() {
   // auto-clean previous run data
   const penDir = join(__dirname, ".pen-agent");
   if (existsSync(penDir)) {
-    const { rmSync } = await import("node:fs");
     rmSync(penDir, { recursive: true, force: true });
     console.log(chalk.gray("[agent] cleaned previous .pen-agent data"));
   }
+  if (existsSync(config.artifactDir)) {
+    rmSync(config.artifactDir, { recursive: true, force: true });
+    console.log(chalk.gray(`[agent] cleaned previous artifact data: ${config.artifactDir}`));
+  }
+  mkdirSync(config.artifactDir, { recursive: true });
+  mkdirSync(join(config.artifactDir, "scripts"), { recursive: true });
+  mkdirSync(join(config.artifactDir, "payloads"), { recursive: true });
+  mkdirSync(join(config.artifactDir, "downloads"), { recursive: true });
+  mkdirSync(join(config.artifactDir, "notes"), { recursive: true });
 
   if (config.apiKey) {
     const authDir = join(os.homedir(), ".local", "share", "opencode");
