@@ -1,0 +1,221 @@
+name: docker-linux-enterprise-lab
+
+services:
+  thinkphp:
+    build:
+      context: ./thinkphp
+    container_name: lab-thinkphp
+    hostname: thinkphp
+    cap_add:
+      - NET_ADMIN
+    environment:
+      LAB_ROUTES: "10.80.20.0/24:10.80.10.20 10.80.30.0/24:10.80.10.20"
+    volumes:
+      - ./flags/thinkphp/flag.txt:/flag.txt:ro
+    networks:
+      dmz:
+        ipv4_address: 10.80.10.10
+    ports:
+      - "18080:80"
+    depends_on:
+      - jump01
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1/ >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  jump01:
+    build:
+      context: ./jump
+    container_name: lab-jump01
+    hostname: jump01
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    networks:
+      dmz:
+        ipv4_address: 10.80.10.20
+      office:
+        ipv4_address: 10.80.20.254
+      core:
+        ipv4_address: 10.80.30.254
+    ports:
+      - "2222:22"
+
+  intranet:
+    build:
+      context: ./intranet
+    container_name: lab-intranet
+    hostname: intranet
+    networks:
+      office:
+        ipv4_address: 10.80.20.10
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/ >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  wiki01:
+    image: vulhub/struts2:2.3.30
+    container_name: lab-wiki01
+    hostname: wiki01
+    volumes:
+      - ./flags/wiki01/flag.txt:/flag.txt:ro
+    networks:
+      office:
+        ipv4_address: 10.80.20.11
+
+  git01:
+    image: vulhub/gogs:0.11.66
+    container_name: lab-git01
+    hostname: git01
+    entrypoint: ["/bin/sh", "/usr/local/bin/lab-gogs-entrypoint"]
+    command: ["/bin/s6-svscan", "/app/gogs/docker/s6/"]
+    volumes:
+      - ./flags/git01/flag.txt:/flag.txt:ro
+      - ./flags/git01/flag.txt:/app/gogs/public/flag.txt:ro
+      - ./gogs/lab-entrypoint.sh:/usr/local/bin/lab-gogs-entrypoint:ro
+    networks:
+      office:
+        ipv4_address: 10.80.20.20
+
+  mail01:
+    image: axllent/mailpit:latest
+    container_name: lab-mail01
+    hostname: mail01
+    networks:
+      office:
+        ipv4_address: 10.80.20.30
+
+  dev01:
+    build:
+      context: ./devbox
+    container_name: lab-dev01
+    hostname: dev01
+    cap_add:
+      - NET_ADMIN
+    environment:
+      CORE_CIDR: 10.80.30.0/24
+      JUMP_IP: 10.80.20.254
+    depends_on:
+      - jump01
+    networks:
+      office:
+        ipv4_address: 10.80.20.50
+
+  dns01:
+    image: coredns/coredns:1.11.3
+    container_name: lab-dns01
+    hostname: dns01
+    command: ["-conf", "/etc/coredns/Corefile"]
+    volumes:
+      - ./dns:/etc/coredns:ro
+    networks:
+      core:
+        ipv4_address: 10.80.30.53
+
+  ldap01:
+    image: osixia/openldap:1.5.0
+    container_name: lab-ldap01
+    hostname: ldap01
+    environment:
+      LDAP_ORGANISATION: Example Corp
+      LDAP_DOMAIN: corp.local
+      LDAP_ADMIN_PASSWORD: AdminPassw0rd!
+    networks:
+      core:
+        ipv4_address: 10.80.30.10
+
+  db01:
+    image: mariadb:11.4
+    container_name: lab-db01
+    hostname: db01
+    environment:
+      MARIADB_ROOT_PASSWORD: RootPassw0rd!
+      MARIADB_DATABASE: app_prod
+      MARIADB_USER: app_svc
+      MARIADB_PASSWORD: AppSvcPass123!
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - mariadb-data:/var/lib/mysql
+    networks:
+      core:
+        ipv4_address: 10.80.30.20
+
+  cache01:
+    image: vulhub/redis:5.0.7
+    container_name: lab-cache01
+    hostname: cache01
+    volumes:
+      - ./flags/cache01/flag.txt:/flag.txt:ro
+    networks:
+      core:
+        ipv4_address: 10.80.30.30
+
+  files01:
+    image: vulhub/samba:4.6.3
+    container_name: lab-files01
+    hostname: files01
+    tty: true
+    volumes:
+      - ./vuln-samba/smb.conf:/usr/local/samba/etc/smb.conf:ro
+      - ./flags/files01/flag.txt:/flag.txt:ro
+      - ./flags/files01/flag.txt:/home/share/flag.txt:ro
+    networks:
+      core:
+        ipv4_address: 10.80.30.40
+
+  minio01:
+    image: minio/minio:latest
+    container_name: lab-minio01
+    hostname: minio01
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: MinioAdmin123!
+    command: ["server", "/data", "--console-address", ":9001"]
+    volumes:
+      - minio-data:/data
+    networks:
+      core:
+        ipv4_address: 10.80.30.50
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: lab-minio-init
+    depends_on:
+      - minio01
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        until mc alias set lab http://minio01:9000 minioadmin MinioAdmin123!; do sleep 2; done;
+        mc mb --ignore-existing lab/flag;
+        mc cp /seed/flag.txt lab/flag/flag.txt;
+        mc anonymous set download lab/flag || true;
+    volumes:
+      - ./flags/minio01:/seed:ro
+    networks:
+      core:
+
+networks:
+  dmz:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.80.10.0/24
+  office:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.80.20.0/24
+  core:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.80.30.0/24
+
+volumes:
+  mariadb-data:
+  minio-data:
