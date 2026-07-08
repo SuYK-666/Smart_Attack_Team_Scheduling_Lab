@@ -1,4 +1,6 @@
 import chalk from "chalk";
+import { createInterface } from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
 import { FlagCounter } from "./flag-counter.js";
 import { Runner } from "./runner.js";
 import { ProxyServer } from "./proxy/proxy-server.js";
@@ -26,6 +28,7 @@ export async function startAgent(config) {
   let loopIndex = 0;
   let staleLoops = 0;
   let prevSummary = null;
+  let continueBeyondMaxFlags = false;
   const runner = new Runner(config);
 
   while (loopIndex < config.maxLoops) {
@@ -88,9 +91,21 @@ export async function startAgent(config) {
       console.log(chalk.red(`[error] runner failed: ${(result.error || "unknown").slice(0, 200)}`));
     }
 
-    if (config.maxFlags && flagCounter.count() >= config.maxFlags) {
-      console.log(chalk.green(`\n[complete] max flags (${config.maxFlags}) reached. Flags found: ${flagCounter.count()}`));
-      break;
+    if (config.maxFlags && !continueBeyondMaxFlags && flagCounter.count() >= config.maxFlags) {
+      const hasExtraLead = hasPossibleExtraFlagLead(findings);
+      if (hasExtraLead) {
+        const shouldContinue = await askContinueAfterMaxFlags(config.maxFlags, flagCounter.count(), findings);
+        if (shouldContinue) {
+          continueBeyondMaxFlags = true;
+          console.log(chalk.yellow("[agent] continuing beyond --max-flags; future stop depends on stale-stop or max-loops."));
+        } else {
+          console.log(chalk.green(`\n[complete] max flags (${config.maxFlags}) reached. User chose to stop. Flags found: ${flagCounter.count()}`));
+          break;
+        }
+      } else {
+        console.log(chalk.green(`\n[complete] max flags (${config.maxFlags}) reached. No extra flag lead detected. Flags found: ${flagCounter.count()}`));
+        break;
+      }
     }
 
     const minLoopsReached = loopIndex >= config.minLoops;
@@ -180,6 +195,61 @@ function hasMeaningfulFindings(findings) {
     findings.newAccess?.length ||
     findings.intel?.length
   );
+}
+
+function hasPossibleExtraFlagLead(findings) {
+  if (!findings) return false;
+  if (
+    findings.newHosts?.length ||
+    findings.newServices?.length ||
+    findings.newCredentials?.length ||
+    findings.newAccess?.length ||
+    findings.intel?.length
+  ) {
+    return true;
+  }
+
+  const leadText = [
+    findings.summary,
+    ...(findings.nextSteps || []),
+    ...(findings.problems || []).flatMap((p) => [p.resolution, p.cause]),
+    ...(findings.analysisTrail || []).flatMap((a) => [a.decision, a.hypothesis, a.evidence]),
+  ].filter(Boolean).join("\n");
+
+  return /继续|额外|更多|另一个|其他|未验证|可扩展|下一步|补漏|入口|漏洞|路径|目录|参数|服务|凭据|权限|内网|源码|配置/i.test(leadText);
+}
+
+async function askContinueAfterMaxFlags(maxFlags, flagsFound, findings) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.log(chalk.yellow(`[agent] max flags (${maxFlags}) reached and extra leads exist, but stdin is not interactive; stopping.`));
+    return false;
+  }
+
+  console.log(chalk.yellow(`\n[agent] max flags (${maxFlags}) reached. Flags found: ${flagsFound}.`));
+  console.log(chalk.yellow("[agent] possible extra flag leads detected:"));
+  for (const lead of summarizeExtraLeads(findings)) {
+    console.log(chalk.yellow(`  - ${lead}`));
+  }
+
+  const rl = createInterface({ input, output });
+  try {
+    const answer = await rl.question(chalk.yellow("Continue searching for extra flags? [y/N] "));
+    return /^(y|yes)$/i.test(answer.trim());
+  } finally {
+    rl.close();
+  }
+}
+
+function summarizeExtraLeads(findings) {
+  const leads = [];
+  for (const value of findings.intel || []) leads.push(`intel: ${String(value).slice(0, 120)}`);
+  for (const value of findings.nextSteps || []) leads.push(`next step: ${String(value).slice(0, 120)}`);
+  for (const value of findings.newHosts || []) leads.push(`host: ${value}`);
+  for (const value of findings.newServices || []) leads.push(`service: ${value.host || "?"}:${value.port || "?"} ${value.name || ""}`.trim());
+  for (const value of findings.newCredentials || []) leads.push(`credential: ${value.username || "?"}@${value.host || value.service || "?"}`);
+  for (const value of findings.newAccess || []) leads.push(`access: ${String(value).slice(0, 120)}`);
+  if (leads.length === 0 && findings.summary) leads.push(`summary: ${findings.summary.slice(0, 120)}`);
+  return leads.slice(0, 6);
 }
 
 function printFindings(findings) {

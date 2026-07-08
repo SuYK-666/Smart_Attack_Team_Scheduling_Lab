@@ -135,7 +135,7 @@ node index.js -t example.ctf.local -p 80 --max-loops 50 --min-loops 3 --stop-aft
 | `-t, --target <host>` | 目标主机或域名 | `127.0.0.1` |
 | `-p, --port <port>` | 目标端口 | `80` |
 | `-f, --flags <n>` | 最低 flag 目标数量，低于该值最终退出码为失败 | `1` |
-| `--max-flags <n>` | flag 数量上限，达到该数量后停止循环 | 不限制 |
+| `--max-flags <n>` | flag 数量上限；达到后若发现额外线索会询问是否继续，否则停止循环 | 不限制 |
 | `-m, --model <model>` | opencode 使用的模型 | `deepseek/deepseek-v4-flash` |
 | `-a, --agent <agent>` | opencode agent 名称 | 空 |
 | `-k, --key <key>` | 写入 opencode auth 的 API Key | 空 |
