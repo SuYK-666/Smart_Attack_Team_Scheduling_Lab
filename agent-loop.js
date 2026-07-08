@@ -28,7 +28,7 @@ export async function startAgent(config) {
 
   console.log(chalk.green(`[system] opencode backend: ${config.attachUrl}`));
   console.log(chalk.green(`[system] artifact dir: ${config.artifactDir}`));
-  console.log(chalk.green(`[system] flag stop: ${config.maxFlags ? `stop after ${config.maxFlags} valid flags` : "continue until stale-stop or max-loops"}`));
+  console.log(chalk.green(`[system] estimated max flags: ${config.maxFlags ?? "unknown"}; stop still depends on leads, stale-stop, and max-loops`));
 
   let loopIndex = 0;
   let staleLoops = 0;
@@ -103,13 +103,13 @@ export async function startAgent(config) {
         const shouldContinue = await askContinueAfterMaxFlags(config.maxFlags, flagCounter.count(), findings);
         if (shouldContinue) {
           continueBeyondMaxFlags = true;
-          console.log(chalk.yellow("[agent] continuing beyond --max-flags; future stop depends on stale-stop or max-loops."));
+          console.log(chalk.yellow("[agent] continuing beyond estimated --max-flags; future stop depends on stale-stop or max-loops."));
         } else {
-          console.log(chalk.green(`\n[complete] max flags (${config.maxFlags}) reached. User chose to stop. Flags found: ${flagCounter.count()}`));
+          console.log(chalk.green(`\n[complete] estimated max flags (${config.maxFlags}) reached. User chose to stop. Flags found: ${flagCounter.count()}`));
           break;
         }
       } else {
-        console.log(chalk.green(`\n[complete] max flags (${config.maxFlags}) reached. No extra flag lead detected. Flags found: ${flagCounter.count()}`));
+        console.log(chalk.green(`\n[complete] estimated max flags (${config.maxFlags}) reached. No extra flag lead detected. Flags found: ${flagCounter.count()}`));
         break;
       }
     }
@@ -230,11 +230,11 @@ function hasPossibleExtraFlagLead(findings) {
 
 async function askContinueAfterMaxFlags(maxFlags, flagsFound, findings) {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    console.log(chalk.yellow(`[agent] max flags (${maxFlags}) reached and extra leads exist, but stdin is not interactive; stopping.`));
+    console.log(chalk.yellow(`[agent] estimated max flags (${maxFlags}) reached and extra leads exist, but stdin is not interactive; stopping.`));
     return false;
   }
 
-  console.log(chalk.yellow(`\n[agent] max flags (${maxFlags}) reached. Flags found: ${flagsFound}.`));
+  console.log(chalk.yellow(`\n[agent] estimated max flags (${maxFlags}) reached. Flags found: ${flagsFound}.`));
   console.log(chalk.yellow("[agent] possible extra flag leads detected:"));
   for (const lead of summarizeExtraLeads(findings)) {
     console.log(chalk.yellow(`  - ${lead}`));

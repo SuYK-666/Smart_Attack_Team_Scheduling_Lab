@@ -107,7 +107,7 @@ Usage: node index.js [options]
 
 Options:
   -f, --flags <n>     Minimum number of flags needed for success (default: 1)
-  --max-flags <n>     Stop after finding this many valid flags (default: unlimited)
+  --max-flags <n>     Estimated maximum flag count; ask before searching beyond it (default: unlimited)
   -t, --target <host> Target hostname/IP (default: 127.0.0.1)
   -p, --port <n>      Target port (default: 80)
   -m, --model <m>     OpenCode model (provider/model) (default: deepseek/deepseek-v4-flash)
@@ -159,7 +159,7 @@ function validate(config) {
 function dump(config) {
   console.log("=== pen-agent config ===");
   console.log(`  Flags needed:    ${config.flagsNeeded}`);
-  console.log(`  Max flags:       ${config.maxFlags ?? "unlimited"}`);
+  console.log(`  Est. max flags:  ${config.maxFlags ?? "unknown"}`);
   console.log(`  Target:          ${config.target}`);
   console.log(`  Max loops:       ${config.maxLoops}`);
   console.log(`  Proxy port:      ${config.proxyPort}`);

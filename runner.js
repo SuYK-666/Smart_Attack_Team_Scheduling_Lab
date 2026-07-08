@@ -146,7 +146,7 @@ export class Runner {
     p += `入口目标: ${this.config.targetHost}:${this.config.targetPort}\n`;
     p += `最低 flag 目标: ${this.config.flagsNeeded}。`;
     if (this.config.maxFlags) {
-      p += `最多收集 ${this.config.maxFlags} 个有效 flag，达到后整体任务会停止。`;
+      p += `当前预估目标最多可能有 ${this.config.maxFlags} 个有效 flag；这不是硬性上限。达到该数量后，如果仍发现未验证入口或额外 flag 线索，必须在总结中明确说明。`;
     } else {
       p += "找到 flag 后不要立即结束整体任务，但本轮必须按本轮计划边界停止。";
     }
