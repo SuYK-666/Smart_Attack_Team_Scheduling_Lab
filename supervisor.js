@@ -116,8 +116,8 @@ function mergeWithFallback(parsed, fallback) {
     keyActions: parsed.keyActions?.length ? parsed.keyActions : fallback.keyActions,
     toolCalls: parsed.toolCalls?.length ? parsed.toolCalls : fallback.toolCalls,
     analysisTrail: parsed.analysisTrail?.length ? parsed.analysisTrail : fallback.analysisTrail,
-    problems: parsed.problems?.length ? parsed.problems : fallback.problems,
-    nextSteps: parsed.nextSteps?.length ? parsed.nextSteps : fallback.nextSteps,
+    problems: mergeProblems(parsed.problems, fallback.problems),
+    nextSteps: mergeUnique(parsed.nextSteps, fallback.nextSteps),
     rewardEvaluation: parsed.rewardEvaluation || fallback.rewardEvaluation,
     position: parsed.position || fallback.position,
     newAccess: parsed.newAccess?.length ? parsed.newAccess : fallback.newAccess,
@@ -139,6 +139,7 @@ function basicExtract(output) {
 
   const toolCalls = extractToolCalls(output);
   const keyActions = toolCalls.slice(0, 12).map((c) => `${c.tool}: ${c.purpose || c.command}`);
+  const problems = extractProblems(output);
 
   return {
     summary: summarizeLocally(output, flags, toolCalls),
@@ -155,8 +156,8 @@ function basicExtract(output) {
       evidence: c.result,
       decision: c.impact,
     })),
-    problems: extractProblems(output),
-    nextSteps: flags.length ? ["已找到 flag，可复核日志中的利用路径和证据链。"] : ["继续根据已发现服务逐一验证漏洞面。"],
+    problems,
+    nextSteps: inferNextSteps(flags, problems),
     rewardEvaluation: flags.length
       ? { level: "额外奖励", reason: "本轮输出中出现 flag，属于高价值发现；仍需结合日志确认是否遵守本轮边界。" }
       : { level: toolCalls.length ? "基础奖励" : "无奖励", reason: toolCalls.length ? "本轮存在可见工具调用和证据输出。" : "未解析到明确工具调用或有效证据。" },
@@ -164,6 +165,17 @@ function basicExtract(output) {
     newAccess: [],
     intel: extractIntel(output),
   };
+}
+
+function inferNextSteps(flags, problems) {
+  const steps = [];
+  if (flags.length) steps.push("已找到 flag，可复核日志中的利用路径和证据链。");
+  if (problems.some((p) => /SMB|smbclient|协议客户端/.test(`${p.symptom} ${p.cause} ${p.resolution}`))) {
+    steps.push("对 SMB/files01 停止重复裸 TCP 或 curl 尝试，优先寻找具备 smbclient/impacket 的跳板节点。");
+    steps.push("如果存在 jump/dev/workstation 节点，验证是否可在该节点运行 smbclient，或建立 TCP 隧道后在本机枚举 SMB 共享。");
+  }
+  if (!steps.length) steps.push("继续根据已发现服务逐一验证漏洞面。");
+  return steps;
 }
 
 function extractToolCalls(output) {
@@ -206,6 +218,7 @@ function inferTool(command) {
 
 function inferPurpose(command) {
   if (/nmap|Test-NetConnection|TcpClient/i.test(command)) return "枚举端口或验证服务连通性";
+  if (/smbclient|mount\.cifs|impacket-smbclient|psexec\.py|smbexec\.py/i.test(command)) return "验证 SMB 共享、认证或文件读取能力";
   if (/ORDER%20BY|UNION|sqlite_master|database\(|sqlite_version/i.test(command)) return "验证并利用 SQL 注入";
   if (/\/login|username=|password=/i.test(command)) return "使用发现的凭据登录验证权限";
   if (/-F|multipart|upload|filename=/i.test(command)) return "测试文件上传与绕过";
@@ -216,6 +229,8 @@ function inferPurpose(command) {
 
 function inferImpact(command, result) {
   if (/flag\{[^}]+\}/i.test(result)) return "结果中出现 flag，进入验证收尾";
+  if (/smbclient: not found|mount\.cifs: not found|impacket.*not found|No module named ['"]?impacket/i.test(result)) return "SMB 客户端或库缺失，应寻找具备工具的跳板节点或建立 TCP 隧道";
+  if (/(445|139).*(open|OPEN)|smb|samba/i.test(command + " " + result) && /timed out|timeout|fread|无响应|failed|无法|not supported/i.test(result)) return "SMB 端口可能可达，但当前方式无法完成协议级交互";
   if (/数据库错误|SQL|sqlite|users|CREATE TABLE|UNION/i.test(result + command)) return "结果支持继续沿 SQL 注入路径枚举数据库";
   if (/登录失败|Invalid|Forbidden|404|timed out|error/i.test(result)) return "该尝试失败，需要更换 payload、参数或攻击面";
   if (/Upload Success|Stored in/i.test(result)) return "上传成功，可继续验证访问路径和执行可能性";
@@ -224,6 +239,7 @@ function inferImpact(command, result) {
 
 function inferPhase(command) {
   if (/nmap|TcpClient|Get-Command|curl.*http:\/\/[^/"]+["\s]?$/i.test(command)) return "信息收集";
+  if (/smbclient|mount\.cifs|impacket-smbclient|445|139|smb|samba/i.test(command)) return "横向移动";
   if (/ORDER%20BY|UNION|sqlite_master|\/login/i.test(command)) return "攻击尝试";
   if (/-F|upload|filename=/i.test(command)) return "攻击尝试";
   if (/cat |ls|id|whoami/i.test(command)) return "回传取证";
@@ -235,7 +251,33 @@ function extractProblems(output) {
   if (/timed out/i.test(output)) problems.push({ symptom: "命令或连接超时", cause: "目标服务无响应或交互协议不匹配", resolution: "切换请求方式、延长超时或更换攻击面" });
   if (/Invalid File|You was catched|Forbidden|404 Not Found/i.test(output)) problems.push({ symptom: "上传、访问或目录探测被拒绝", cause: "服务端存在后缀、内容或路径限制", resolution: "尝试 MIME、后缀、内容魔术头、路径和解析差异绕过" });
   if (/数据库错误/i.test(output)) problems.push({ symptom: "数据库错误页面", cause: "SQL payload 触发异常或列数/函数不匹配", resolution: "调整列数、函数和数据库方言继续验证" });
+  problems.push(...extractProtocolBlockers(output));
   return problems;
+}
+
+function extractProtocolBlockers(output) {
+  const blockers = [];
+  const lower = output.toLowerCase();
+  const mentionsSmb = /files01|smb|samba|netbios|445|139/.test(lower);
+  if (!mentionsSmb) return blockers;
+
+  if (/smbclient:\s*not found|which smbclient.*not found|mount\.cifs:\s*not found|no module named ['"]?impacket|impacket.*not found/i.test(output)) {
+    blockers.push({
+      symptom: "SMB 目标可见但协议客户端缺失",
+      cause: "当前执行环境缺少 smbclient、mount.cifs 或 python3+impacket，无法枚举共享或读取 SMB 文件",
+      resolution: "停止重复裸 TCP/HTTP 尝试，寻找具备 SMB 工具的内网跳板节点，或建立 TCP 隧道后在本机使用 smbclient/impacket",
+    });
+  }
+
+  if (/(fsockopen|fread|stream_set_timeout|nc|curl smb:\/\/|raw smb|原始 smb|裸 tcp)/i.test(output) && /(timed out|timeout|阻塞|无响应|无法获取有效响应|protocol.*not supported|not supported|failed)/i.test(output)) {
+    blockers.push({
+      symptom: "SMB 裸 TCP 或伪 banner 探测失败",
+      cause: "SMB 是二进制状态协议，需要 negotiate、session setup、tree connect 和文件读取流程，不能依赖简单 fread、curl 或随机 nc 发包完成",
+      resolution: "将该节点标记为 TCP 可达但协议交互受阻，下一步改用 smbclient/impacket 或通过 dev/workstation/bastion 建立访问路径",
+    });
+  }
+
+  return blockers;
 }
 
 function extractIntel(output) {
@@ -244,6 +286,7 @@ function extractIntel(output) {
   if (/users,articles/i.test(output)) intel.push("发现 users 和 articles 表。");
   if (/CREATE TABLE users/i.test(output)) intel.push("users 表包含 id、username、password 字段。");
   if (/管理员面板|Flag:/i.test(output)) intel.push("管理员面板会直接显示 flag。");
+  if (/files01|10\.80\.30\.40|samba|smb/i.test(output)) intel.push("发现或验证了 files01/SMB 攻击面，后续需要 SMB 客户端、impacket 或 TCP 隧道完成共享枚举。");
   return intel;
 }
 
@@ -255,6 +298,19 @@ function summarizeLocally(output, flags, toolCalls) {
 
 function mergeUnique(a = [], b = []) {
   return [...new Set([...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])])];
+}
+
+function mergeProblems(a = [], b = []) {
+  const seen = new Set();
+  const merged = [];
+  for (const problem of [...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])]) {
+    if (!problem) continue;
+    const key = `${problem.symptom || ""}:${problem.cause || ""}:${problem.resolution || ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(problem);
+  }
+  return merged;
 }
 
 function dedupeCreds(creds) {
