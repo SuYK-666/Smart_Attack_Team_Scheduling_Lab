@@ -58,6 +58,8 @@ async function main() {
   console.log(`  Loops used:   ${result.loopsUsed}`);
   console.log(`  Flags found:  ${result.flagsFound.length}/${config.flagsNeeded}`);
   console.log(`  Log:          ${result.whiteboardPath}`);
+  console.log(`  Flags JSON:   ${result.flagJsonPath}`);
+  console.log(`  Flags text:   ${result.flagTextPath}`);
 
   if (result.flagsFound.length > 0) {
     console.log(chalk.green("\n  Flags:"));

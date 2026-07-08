@@ -126,7 +126,7 @@ function mergeWithFallback(parsed, fallback) {
 }
 
 function basicExtract(output) {
-  const flags = [...new Set([...output.matchAll(/flag\{[^}]+\}|Flag\{[^}]+\}|CTF\{[^}]+\}/g)].map((m) => m[0]))];
+  const flags = [...new Set([...output.matchAll(/(?<![A-Za-z0-9_])[A-Za-z0-9_]{2,32}\{[^}\s]{3,128}\}/g)].map((m) => m[0]))];
   const hosts = [];
   for (const m of output.matchAll(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/g)) {
     if (!hosts.includes(m[1]) && !m[1].startsWith("0.") && !m[1].startsWith("127.0.0.1")) hosts.push(m[1]);

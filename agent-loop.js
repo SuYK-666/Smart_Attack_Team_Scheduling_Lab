@@ -2,6 +2,7 @@ import chalk from "chalk";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { FlagCounter } from "./flag-counter.js";
+import { FlagStore } from "./flag-store.js";
 import { Runner } from "./runner.js";
 import { ProxyServer } from "./proxy/proxy-server.js";
 import { Whiteboard } from "./whiteboard.js";
@@ -10,10 +11,14 @@ import { supervise } from "./supervisor.js";
 export async function startAgent(config) {
   const whiteboard = new Whiteboard(config.workDir);
   const flagCounter = new FlagCounter(config.flagPattern);
+  const flagStore = new FlagStore(config.artifactDir, config);
   const proxy = new ProxyServer(config.proxyPort);
 
+  flagStore.write([]);
   whiteboard.setConfig("target", config.target);
   whiteboard.setConfig("artifactDir", config.artifactDir);
+  whiteboard.setConfig("flagJsonPath", flagStore.jsonPath);
+  whiteboard.setConfig("flagTextPath", flagStore.textPath);
   whiteboard.setConfig("maxFlags", config.maxFlags ?? "unlimited");
   whiteboard.setFlagCount(0, config.flagsNeeded);
 
@@ -74,6 +79,7 @@ export async function startAgent(config) {
       console.log(chalk.green(`[finding] new flags: ${allNewFlags.length}`));
       for (const f of allNewFlags) console.log(chalk.green(`  ${f}`));
       whiteboard.setFlagCount(flagCounter.count(), config.flagsNeeded);
+      flagStore.write(flagCounter.all(), { loopsUsed: loopIndex });
     }
 
     printFindings(findings);
@@ -123,11 +129,14 @@ export async function startAgent(config) {
   }
 
   proxy.stop();
+  flagStore.write(flagCounter.all(), { loopsUsed: loopIndex });
 
   return {
     flagsFound: flagCounter.all(),
     loopsUsed: loopIndex,
     whiteboardPath: whiteboard.statePath,
+    flagJsonPath: flagStore.jsonPath,
+    flagTextPath: flagStore.textPath,
   };
 }
 

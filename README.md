@@ -145,7 +145,7 @@ node index.js -t example.ctf.local -p 80 --max-loops 50 --min-loops 3 --stop-aft
 | `--stop-after-stale <n>` | 连续无新增发现多少轮后停止 | `2` |
 | `--proxy-port <port>` | 横向代理服务端口 | `9999` |
 | `--artifact-dir <path>` | 中间产物目录 | `./artifacts` |
-| `--pattern <regex>` | 自定义 flag 正则 | `flag{...}` / `Flag{...}` / `CTF{...}` |
+| `--pattern <regex>` | 自定义 flag 正则 | 默认保留任意字母数字下划线前缀，如 `flag{...}` / `NSSCTF{...}` |
 | `--status` | 查看当前运行状态 | 无 |
 
 ## 日志与产物
@@ -166,6 +166,8 @@ logs/
   opencode-serve.err.log
 
 artifacts/
+  flags.json       结构化 flag 输出，供前端或其他程序读取
+  flags.txt        纯文本 flag 列表，便于人工检查
   scripts/         Python、Shell、PoC、辅助脚本
   payloads/        payload、上传样本、webshell 样本
   downloads/       下载响应、页面、文件、Cookie

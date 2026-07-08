@@ -22,7 +22,7 @@ function parseArgs() {
     minLoops: 3,
     stopAfterStale: 2,
     proxyPort: 9999,
-    flagPattern: /flag\{[^}]+\}|Flag\{[^}]+\}|CTF\{[^}]+\}/g,
+    flagPattern: /(?<![A-Za-z0-9_])[A-Za-z0-9_]{2,32}\{[^}\s]{3,128}\}/g,
   };
 
   for (let i = 0; i < args.length; i++) {
