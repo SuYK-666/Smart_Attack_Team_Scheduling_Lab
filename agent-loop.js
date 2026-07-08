@@ -12,6 +12,7 @@ export async function startAgent(config) {
 
   whiteboard.setConfig("target", config.target);
   whiteboard.setConfig("artifactDir", config.artifactDir);
+  whiteboard.setConfig("maxFlags", config.maxFlags ?? "unlimited");
   whiteboard.setFlagCount(0, config.flagsNeeded);
 
   await proxy.start().catch((e) => {
@@ -20,7 +21,7 @@ export async function startAgent(config) {
 
   console.log(chalk.green(`[system] opencode backend: ${config.attachUrl}`));
   console.log(chalk.green(`[system] artifact dir: ${config.artifactDir}`));
-  console.log(chalk.green("[system] exhaustive mode: continue after first flag until stale-stop or max-loops"));
+  console.log(chalk.green(`[system] flag stop: ${config.maxFlags ? `stop after ${config.maxFlags} valid flags` : "continue until stale-stop or max-loops"}`));
 
   let loopIndex = 0;
   let staleLoops = 0;
@@ -35,7 +36,8 @@ export async function startAgent(config) {
       lastSummary: prevSummary,
     });
 
-    console.log(chalk.yellow(`\n=== loop ${loopIndex}/${config.maxLoops} | flags: ${flagCounter.count()}/${config.flagsNeeded}+ | stale: ${staleLoops}/${config.stopAfterStale} ===`));
+    const flagTarget = config.maxFlags ? `${config.flagsNeeded}-${config.maxFlags}` : `${config.flagsNeeded}+`;
+    console.log(chalk.yellow(`\n=== loop ${loopIndex}/${config.maxLoops} | flags: ${flagCounter.count()}/${flagTarget} | stale: ${staleLoops}/${config.stopAfterStale} ===`));
     console.log(chalk.yellow(`[loop plan] ${loopPlan.title}`));
     for (const item of loopPlan.goals) console.log(chalk.yellow(`  - ${item}`));
 
@@ -45,6 +47,7 @@ export async function startAgent(config) {
       loopPlan,
       flagsFound: flagCounter.count(),
       flagsNeeded: config.flagsNeeded,
+      maxFlags: config.maxFlags,
       foundFlags: flagCounter.all(),
       whiteboardSummary: whiteboard.summary(),
       lastOutput: prevSummary,
@@ -83,6 +86,11 @@ export async function startAgent(config) {
 
     if (!result.success) {
       console.log(chalk.red(`[error] runner failed: ${(result.error || "unknown").slice(0, 200)}`));
+    }
+
+    if (config.maxFlags && flagCounter.count() >= config.maxFlags) {
+      console.log(chalk.green(`\n[complete] max flags (${config.maxFlags}) reached. Flags found: ${flagCounter.count()}`));
+      break;
     }
 
     const minLoopsReached = loopIndex >= config.minLoops;

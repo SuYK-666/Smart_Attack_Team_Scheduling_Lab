@@ -8,6 +8,7 @@ function parseArgs() {
   const args = process.argv.slice(2);
   const config = {
     flagsNeeded: 1,
+    maxFlags: null,
     target: null,
     targetHost: "127.0.0.1",
     targetPort: 80,
@@ -29,6 +30,9 @@ function parseArgs() {
       case "-f":
       case "--flags":
         config.flagsNeeded = parseInt(args[++i], 10);
+        break;
+      case "--max-flags":
+        config.maxFlags = parseInt(args[++i], 10);
         break;
       case "-t":
       case "--target":
@@ -102,7 +106,8 @@ pen-agent - Automated penetration testing agent
 Usage: node index.js [options]
 
 Options:
-  -f, --flags <n>     Number of flags needed (default: 1)
+  -f, --flags <n>     Minimum number of flags needed for success (default: 1)
+  --max-flags <n>     Stop after finding this many valid flags (default: unlimited)
   -t, --target <host> Target hostname/IP (default: 127.0.0.1)
   -p, --port <n>      Target port (default: 80)
   -m, --model <m>     OpenCode model (provider/model) (default: deepseek/deepseek-v4-flash)
@@ -126,6 +131,16 @@ function validate(config) {
     console.error("Error: --flags must be a positive integer");
     return false;
   }
+  if (config.maxFlags !== null) {
+    if (isNaN(config.maxFlags) || config.maxFlags < 1) {
+      console.error("Error: --max-flags must be a positive integer");
+      return false;
+    }
+    if (config.maxFlags < config.flagsNeeded) {
+      console.error("Error: --max-flags must be greater than or equal to --flags");
+      return false;
+    }
+  }
   if (config.maxLoops < 1) {
     console.error("Error: --max-loops must be at least 1");
     return false;
@@ -144,6 +159,7 @@ function validate(config) {
 function dump(config) {
   console.log("=== pen-agent config ===");
   console.log(`  Flags needed:    ${config.flagsNeeded}`);
+  console.log(`  Max flags:       ${config.maxFlags ?? "unlimited"}`);
   console.log(`  Target:          ${config.target}`);
   console.log(`  Max loops:       ${config.maxLoops}`);
   console.log(`  Proxy port:      ${config.proxyPort}`);

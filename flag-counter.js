@@ -1,7 +1,18 @@
-const DEFAULT_FLAG_PATTERN = /flag\{[^}]+\}|Flag\{[^}]+\}|CTF\{[^}]+\}/g;
+const DEFAULT_FLAG_PATTERN = /\b(?:flag|Flag|FLAG|ctf|CTF)\{[^}\s]{3,128}\}/g;
+const COMMON_FLAG_FORMAT = /^(?:flag|Flag|FLAG|ctf|CTF)\{([A-Za-z0-9][A-Za-z0-9_\-+=/@:.,!?#$%&*]{2,127})\}$/;
+const PLACEHOLDER_VALUES = new Set([
+  "flag",
+  "yourflag",
+  "your_flag",
+  "example",
+  "test",
+  "placeholder",
+  "redacted",
+  "todo",
+]);
 
 export class FlagCounter {
-  constructor(pattern) {
+  constructor(pattern = DEFAULT_FLAG_PATTERN) {
     this.pattern = new RegExp(pattern.source, pattern.flags + (pattern.flags.includes("g") ? "" : "g"));
     this.found = new Set();
   }
@@ -11,9 +22,7 @@ export class FlagCounter {
     const newlyFound = [];
     for (const m of matches) {
       const flag = m[0];
-      const inner = flag.slice(5, -1);
-      if (inner.length < 3) continue;
-      if (/[\[\]\\^$]/.test(inner)) continue;
+      if (!isCommonFlag(flag)) continue;
       if (!this.found.has(flag)) {
         this.found.add(flag);
         newlyFound.push(flag);
@@ -33,4 +42,17 @@ export class FlagCounter {
   reset() {
     this.found.clear();
   }
+}
+
+function isCommonFlag(flag) {
+  const match = flag.match(COMMON_FLAG_FORMAT);
+  if (!match) return false;
+
+  const inner = match[1];
+  const normalized = inner.toLowerCase();
+  if (PLACEHOLDER_VALUES.has(normalized)) return false;
+  if (/^x{3,}$/i.test(inner)) return false;
+  if (/^\.+$/.test(inner)) return false;
+
+  return true;
 }
