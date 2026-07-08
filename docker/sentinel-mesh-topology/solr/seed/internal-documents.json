@@ -1,0 +1,12 @@
+[
+  {
+    "id": "sentinel-runbook-001",
+    "title": "Sentinel Mesh service map",
+    "body": "Primary code service is git01.sentinel.local. Storage maintenance uses backup.sentinel.local."
+  },
+  {
+    "id": "sentinel-runbook-002",
+    "title": "Mail workflow",
+    "body": "GitLab invitations and password reset tests are sent through mail01.sentinel.local."
+  }
+]

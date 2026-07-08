@@ -1,0 +1,6 @@
+From: storage@sentinel.local
+To: rpatel@sentinel.local
+Subject: MinIO cluster maintenance window
+
+The distributed MinIO cluster is exposed internally as minio01.sentinel.local.
+Check the operations database runbook before rotating the root credential.

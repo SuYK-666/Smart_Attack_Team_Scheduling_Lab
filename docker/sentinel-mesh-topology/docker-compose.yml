@@ -1,0 +1,302 @@
+name: sentinel-mesh-range
+
+services:
+  entry01:
+    build:
+      context: ./spring-entry
+    container_name: sentinel-entry01
+    hostname: entry01
+    cap_add:
+      - NET_ADMIN
+    environment:
+      LAB_ROUTES: "10.92.20.0/24:10.92.10.20 10.92.30.0/24:10.92.10.20"
+    volumes:
+      - ./flags/entry01/flag.txt:/flag.txt:ro
+      - ./spring-entry/entrypoint.sh:/sentinel-entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/sentinel-entrypoint.sh"]
+    networks:
+      dmz:
+        ipv4_address: 10.92.10.10
+    ports:
+      - "10.122.249.73:18080:8080"
+    depends_on:
+      - jump01
+
+  jump01:
+    build:
+      context: ./jump
+    container_name: sentinel-jump01
+    hostname: jump01
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    networks:
+      dmz:
+        ipv4_address: 10.92.10.20
+      office:
+        ipv4_address: 10.92.20.254
+      core:
+        ipv4_address: 10.92.30.254
+    ports:
+      - "10.122.249.73:2222:22"
+
+  intranet:
+    build:
+      context: ./intranet
+    container_name: sentinel-intranet
+    hostname: intranet
+    networks:
+      office:
+        ipv4_address: 10.92.20.10
+
+  wiki01:
+    image: vulhub/solr:8.2.0
+    container_name: sentinel-wiki01
+    hostname: wiki01
+    volumes:
+      - ./flags/wiki01/flag.txt:/flag.txt:ro
+      - ./solr/seed:/opt/solr/server/solr/seed:ro
+    networks:
+      office:
+        ipv4_address: 10.92.20.11
+
+  gitlab-redis:
+    image: redis:5.0.9-alpine
+    container_name: sentinel-gitlab-redis
+    networks:
+      office: {}
+
+  gitlab-postgresql:
+    image: postgres:12-alpine
+    container_name: sentinel-gitlab-postgresql
+    environment:
+      POSTGRES_USER: gitlab
+      POSTGRES_PASSWORD: GitlabDbPass-Sentinel!
+      POSTGRES_DB: gitlabhq_production
+    volumes:
+      - gitlab-postgresql-data:/var/lib/postgresql/data
+    networks:
+      office: {}
+
+  git01:
+    image: vulhub/gitlab:13.10.1
+    container_name: sentinel-git01
+    hostname: git01
+    depends_on:
+      - gitlab-redis
+      - gitlab-postgresql
+    environment:
+      DB_ADAPTER: postgresql
+      DB_HOST: gitlab-postgresql
+      DB_PORT: 5432
+      DB_USER: gitlab
+      DB_PASS: GitlabDbPass-Sentinel!
+      DB_NAME: gitlabhq_production
+      REDIS_HOST: gitlab-redis
+      REDIS_PORT: 6379
+      GITLAB_HTTPS: "false"
+      GITLAB_HOST: git01.sentinel.local
+      GITLAB_PORT: 80
+      GITLAB_ROOT_PASSWORD: GitRoot-Sentinel!
+      GITLAB_SECRETS_DB_KEY_BASE: SentinelMeshDbKeyBase0123456789abcdef0123456789abcdef
+      GITLAB_SECRETS_SECRET_KEY_BASE: SentinelMeshSecretKeyBase0123456789abcdef0123456789abcdef
+      GITLAB_SECRETS_OTP_KEY_BASE: SentinelMeshOtpKeyBase0123456789abcdef0123456789abcdef
+    volumes:
+      - ./flags/git01/flag.txt:/flag.txt:ro
+      - ./gitlab/seed:/opt/sentinel-seed:ro
+      - gitlab-data:/home/git/data
+    networks:
+      office:
+        ipv4_address: 10.92.20.20
+
+  mail01:
+    image: axllent/mailpit:latest
+    container_name: sentinel-mail01
+    hostname: mail01
+    volumes:
+      - ./mail-seed/messages:/seed/messages:ro
+    networks:
+      office:
+        ipv4_address: 10.92.20.30
+
+  dev01:
+    build:
+      context: ./devbox
+    container_name: sentinel-dev01
+    hostname: dev01
+    cap_add:
+      - NET_ADMIN
+    environment:
+      CORE_CIDR: 10.92.30.0/24
+      JUMP_IP: 10.92.20.254
+    depends_on:
+      - jump01
+    networks:
+      office:
+        ipv4_address: 10.92.20.50
+
+  dns01:
+    image: coredns/coredns:1.11.3
+    container_name: sentinel-dns01
+    hostname: dns01
+    command: ["-conf", "/etc/coredns/Corefile"]
+    volumes:
+      - ./dns:/etc/coredns:ro
+    networks:
+      core:
+        ipv4_address: 10.92.30.53
+
+  ldap01:
+    image: osixia/openldap:1.5.0
+    container_name: sentinel-ldap01
+    hostname: ldap01
+    environment:
+      LDAP_ORGANISATION: Sentinel Mesh
+      LDAP_DOMAIN: sentinel.local
+      LDAP_ADMIN_PASSWORD: LdapAdmin-Sentinel!
+    networks:
+      core:
+        ipv4_address: 10.92.30.10
+
+  db01:
+    image: mariadb:11.4
+    container_name: sentinel-db01
+    hostname: db01
+    environment:
+      MARIADB_ROOT_PASSWORD: Root-Sentinel!
+      MARIADB_DATABASE: sentinel_ops
+      MARIADB_USER: ops_svc
+      MARIADB_PASSWORD: OpsSvc-Sentinel!
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - mariadb-data:/var/lib/mysql
+    networks:
+      core:
+        ipv4_address: 10.92.30.20
+
+  cache01:
+    image: vulhub/couchdb:2.1.0
+    container_name: sentinel-cache01
+    hostname: cache01
+    volumes:
+      - ./flags/cache01/flag.txt:/flag.txt:ro
+      - ./couchdb/seed:/opt/sentinel-seed:ro
+      - couchdb-data:/opt/couchdb/data
+    networks:
+      core:
+        ipv4_address: 10.92.30.30
+
+  files01:
+    build:
+      context: ./proftpd
+    container_name: sentinel-files01
+    hostname: files01
+    volumes:
+      - ./flags/files01/flag.txt:/flag.txt:ro
+      - ./flags/files01/flag.txt:/var/ftp/flag.txt:ro
+      - ./proftpd/ftp-root:/var/ftp/data:rw
+    networks:
+      core:
+        ipv4_address: 10.92.30.40
+
+  minio01:
+    image: vulhub/minio:2023-02-27T18-10-45Z
+    container_name: sentinel-minio01
+    hostname: minio01
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: MinioRoot-Sentinel!
+    command: ["minio", "server", "--console-address", ":9001", "http://minio01:9000/mnt/data", "http://minio02:9000/mnt/data", "http://minio03:9000/mnt/data", "http://minio04:9000/mnt/data"]
+    volumes:
+      - ./minio-cluster/data1:/mnt/data
+    networks:
+      core:
+        ipv4_address: 10.92.30.50
+
+  minio02:
+    image: vulhub/minio:2023-02-27T18-10-45Z
+    container_name: sentinel-minio02
+    hostname: minio02
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: MinioRoot-Sentinel!
+    command: ["minio", "server", "http://minio01:9000/mnt/data", "http://minio02:9000/mnt/data", "http://minio03:9000/mnt/data", "http://minio04:9000/mnt/data"]
+    volumes:
+      - ./minio-cluster/data2:/mnt/data
+    networks:
+      core:
+        ipv4_address: 10.92.30.51
+
+  minio03:
+    image: vulhub/minio:2023-02-27T18-10-45Z
+    container_name: sentinel-minio03
+    hostname: minio03
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: MinioRoot-Sentinel!
+    command: ["minio", "server", "http://minio01:9000/mnt/data", "http://minio02:9000/mnt/data", "http://minio03:9000/mnt/data", "http://minio04:9000/mnt/data"]
+    volumes:
+      - ./minio-cluster/data3:/mnt/data
+    networks:
+      core:
+        ipv4_address: 10.92.30.52
+
+  minio04:
+    image: vulhub/minio:2023-02-27T18-10-45Z
+    container_name: sentinel-minio04
+    hostname: minio04
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: MinioRoot-Sentinel!
+    command: ["minio", "server", "http://minio01:9000/mnt/data", "http://minio02:9000/mnt/data", "http://minio03:9000/mnt/data", "http://minio04:9000/mnt/data"]
+    volumes:
+      - minio-data4:/mnt/data
+    networks:
+      core:
+        ipv4_address: 10.92.30.54
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: sentinel-minio-init
+    depends_on:
+      - minio01
+      - minio02
+      - minio03
+      - minio04
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        until mc alias set sentinel http://minio01:9000 minioadmin MinioRoot-Sentinel!; do sleep 3; done;
+        mc mb --ignore-existing sentinel/flag;
+        mc cp /seed/flag.txt sentinel/flag/flag.txt;
+        mc anonymous set none sentinel/flag || true;
+        echo "seeded s3://flag/flag.txt";
+    volumes:
+      - ./flags/minio01:/seed:ro
+    networks:
+      core: {}
+
+networks:
+  dmz:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.92.10.0/24
+  office:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.92.20.0/24
+  core:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.92.30.0/24
+
+volumes:
+  mariadb-data:
+  gitlab-data:
+  gitlab-postgresql-data:
+  couchdb-data:
+  minio-data4:

@@ -1,0 +1,1 @@
+FLAG{sentinel_object_cluster_env}

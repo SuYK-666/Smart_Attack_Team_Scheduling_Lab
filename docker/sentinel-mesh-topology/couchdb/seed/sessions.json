@@ -1,0 +1,12 @@
+[
+  {
+    "user": "rpatel",
+    "service": "minio",
+    "hint": "Cluster credentials are maintained in the MariaDB operations runbook."
+  },
+  {
+    "user": "mchen",
+    "service": "files01",
+    "hint": "Legacy FTP copy workflow remains enabled for compatibility testing."
+  }
+]
