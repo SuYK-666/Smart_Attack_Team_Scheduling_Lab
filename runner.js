@@ -13,7 +13,7 @@ export class Runner {
     this.runCount = 0;
   }
 
-  async run(context) {
+  async run(context, hooks = {}) {
     this.runCount++;
     const prompt = this._buildPrompt(context);
     const logDir = resolve(this.config.workDir, ".pen-agent");
@@ -34,7 +34,7 @@ export class Runner {
     });
     console.log(chalk.cyan(`\n[runner] loop ${this.runCount} started; prompt=${prompt.length} chars; raw output streams to logs.`));
 
-    const { output, exitCode } = await this._spawn(promptPath, logPath, statusPath);
+    const { output, exitCode } = await this._spawn(promptPath, logPath, statusPath, hooks);
 
     if (exitCode === 0) {
       this._status(statusPath, { phase: "completed", iter: this.runCount, time: new Date().toISOString() });
@@ -45,7 +45,7 @@ export class Runner {
     return { success: false, output, error: `exit code ${exitCode}` };
   }
 
-  _spawn(promptPath, logPath, statusPath) {
+  _spawn(promptPath, logPath, statusPath, hooks = {}) {
     return new Promise((resolvePromise) => {
       const opencodeCmd = process.platform === "win32"
         ? join(process.env.APPDATA || join(os.homedir(), "AppData", "Roaming"), "npm", "node_modules", "opencode-ai", "bin", "opencode.exe")
@@ -80,6 +80,7 @@ export class Runner {
       child.stdout.on("data", (chunk) => {
         const text = chunk.toString();
         output += text;
+        hooks.onOutput?.(text, "stdout");
         appendFileSync(logPath, text);
         process.stdout.write(text);
         this._status(statusPath, {
@@ -92,6 +93,7 @@ export class Runner {
       child.stderr.on("data", (chunk) => {
         const text = chunk.toString();
         output += text;
+        hooks.onOutput?.(text, "stderr");
         appendFileSync(logPath, text);
         process.stderr.write(text);
       });

@@ -181,6 +181,7 @@ artifacts/
 - 不在项目根目录创建 `exploit.py`、`upload_shell.py`、`shell.php`、`.htaccess` 等测试中间文件。
 - 所有脚本和 payload 必须进入 `artifacts/` 的对应子目录。
 - 每次运行测试前，`artifacts/` 会被清空并重新生成。
+- `flags.json` 和 `flags.txt` 会在运行输出中流式发现新 flag 时立即刷新，并在任务结束前再写入一次最终结果。
 - 日志中应记录工具、命令、参数、目的、输出摘要、失败原因和后续影响。
 
 ## 奖励机制

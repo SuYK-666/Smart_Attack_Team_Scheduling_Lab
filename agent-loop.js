@@ -4,6 +4,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { FlagCounter } from "./flag-counter.js";
 import { FlagStore } from "./flag-store.js";
 import { Runner } from "./runner.js";
+import { StreamFlagScanner } from "./stream-flag-scanner.js";
 import { ProxyServer } from "./proxy/proxy-server.js";
 import { Whiteboard } from "./whiteboard.js";
 import { supervise } from "./supervisor.js";
@@ -35,6 +36,7 @@ export async function startAgent(config) {
   let prevSummary = null;
   let continueBeyondMaxFlags = false;
   const runner = new Runner(config);
+  const streamScanner = new StreamFlagScanner(flagCounter);
 
   while (loopIndex < config.maxLoops) {
     loopIndex++;
@@ -61,7 +63,17 @@ export async function startAgent(config) {
       lastOutput: prevSummary,
     };
 
-    const result = await runner.run(context);
+    const result = await runner.run(context, {
+      onOutput: (chunk) => {
+        const newFlags = streamScanner.scan(chunk);
+        if (newFlags.length === 0) return;
+
+        console.log(chalk.green(`\n[finding] streamed flags: ${newFlags.length}`));
+        for (const f of newFlags) console.log(chalk.green(`  ${f}`));
+        whiteboard.setFlagCount(flagCounter.count(), config.flagsNeeded);
+        flagStore.write(flagCounter.all(), { loopsUsed: loopIndex });
+      },
+    });
     const output = (result.output || "") + (result.stderr ? "\n" + result.stderr : "");
 
     console.log(chalk.gray("[supervisor] extracting structured findings from raw output..."));
@@ -76,7 +88,7 @@ export async function startAgent(config) {
     const allNewFlags = flagCounter.all().slice(beforeFlags);
 
     if (allNewFlags.length > 0) {
-      console.log(chalk.green(`[finding] new flags: ${allNewFlags.length}`));
+      console.log(chalk.green(`[finding] post-run flags: ${allNewFlags.length}`));
       for (const f of allNewFlags) console.log(chalk.green(`  ${f}`));
       whiteboard.setFlagCount(flagCounter.count(), config.flagsNeeded);
       flagStore.write(flagCounter.all(), { loopsUsed: loopIndex });
