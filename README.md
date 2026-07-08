@@ -145,8 +145,10 @@ node index.js -t example.ctf.local -p 80 --max-loops 50 --min-loops 3 --stop-aft
 | `--stop-after-stale <n>` | 连续无新增发现多少轮后停止 | `2` |
 | `--proxy-port <port>` | 横向代理服务端口 | `9999` |
 | `--artifact-dir <path>` | 中间产物目录 | `./artifacts` |
-| `--pattern <regex>` | 自定义 flag 正则 | 默认保留任意字母数字下划线前缀，如 `flag{...}` / `NSSCTF{...}` |
+| `--pattern <regex>` | 自定义 flag 正则 | 默认要求前缀包含 `ctf` 或 `flag`，大小写不敏感，如 `flag{...}` / `NSSCTF{...}` |
 | `--status` | 查看当前运行状态 | 无 |
+
+默认任务假设每个节点最多只有一个有效 flag；某节点已确认拿到 flag 后，agent 应转向尚未覆盖的节点或记录后续线索。
 
 ## 日志与产物
 

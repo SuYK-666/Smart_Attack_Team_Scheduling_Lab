@@ -151,6 +151,7 @@ export class Runner {
       p += "找到 flag 后不要立即结束整体任务，但本轮必须按本轮计划边界停止。";
     }
     p += "\n";
+    p += "Flag 分布约束: 每个节点最多只有一个有效 flag；同一节点已确认拿到 flag 后，不要在该节点上反复寻找第二个 flag，应转向尚未覆盖的节点或把后续线索写入下一轮建议。\n";
     if (context.flagsFound > 0) {
       p += `已找到 flag (${context.flagsFound}):\n`;
       for (const flag of context.foundFlags) p += `  ${flag}\n`;

@@ -1,5 +1,5 @@
-const DEFAULT_FLAG_PATTERN = /(?<![A-Za-z0-9_])[A-Za-z0-9_]{2,32}\{[^}\s]{3,128}\}/g;
-const COMMON_FLAG_FORMAT = /^([A-Za-z0-9_]{2,32})\{([A-Za-z0-9][A-Za-z0-9_\-+=/@:.,!?#$%&*]{2,127})\}$/;
+const DEFAULT_FLAG_PATTERN = /(?<![A-Za-z0-9_])(?=[A-Za-z0-9_]{2,32}\{)(?=[A-Za-z0-9_]*(?:ctf|flag))[A-Za-z0-9_]+\{[^}\s]{3,128}\}/gi;
+const COMMON_FLAG_FORMAT = /^([A-Za-z0-9_]{2,32})\{([A-Za-z0-9][A-Za-z0-9_\-+=/@:.,!?#$%&*]{2,127})\}$/i;
 const PLACEHOLDER_VALUES = new Set([
   "flag",
   "yourflag",
@@ -51,6 +51,7 @@ function isCommonFlag(flag) {
   const prefix = match[1];
   const inner = match[2];
   const normalized = inner.toLowerCase();
+  if (!/(ctf|flag)/i.test(prefix)) return false;
   if (/^\d+$/.test(prefix)) return false;
   if (PLACEHOLDER_VALUES.has(normalized)) return false;
   if (/^x{3,}$/i.test(inner)) return false;
