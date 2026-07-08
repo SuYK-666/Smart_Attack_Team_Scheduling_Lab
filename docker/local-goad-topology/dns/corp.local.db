@@ -1,0 +1,18 @@
+$ORIGIN corp.local.
+$TTL 3600
+@       IN SOA  dns01.corp.local. admin.corp.local. 2026070701 7200 3600 1209600 3600
+        IN NS   dns01.corp.local.
+
+thinkphp IN A    10.80.10.10
+jump01   IN A    10.80.10.20
+intranet IN A    10.80.20.10
+wiki01   IN A    10.80.20.11
+git01    IN A    10.80.20.20
+mail01   IN A    10.80.20.30
+dev01    IN A    10.80.20.50
+ldap01   IN A    10.80.30.10
+db01     IN A    10.80.30.20
+cache01  IN A    10.80.30.30
+files01  IN A    10.80.30.40
+minio01  IN A    10.80.30.50
+dns01    IN A    10.80.30.53

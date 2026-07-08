@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ThinkPHP 5.0.12 Entry - Linux Enterprise Lab</title>
+  <style>
+    :root { color-scheme: light; }
+    body { font-family: Arial, sans-serif; margin: 40px; color: #17202a; background: #f7f9fb; }
+    main { max-width: 1120px; }
+    code { background: #eef1f4; padding: 2px 6px; border-radius: 4px; }
+    table { border-collapse: collapse; margin-top: 18px; width: 100%; background: #fff; }
+    th, td { border: 1px solid #c9d1d9; padding: 8px 12px; text-align: left; }
+    th { background: #edf2f7; }
+    .pill { display: inline-block; min-width: 72px; padding: 2px 8px; border-radius: 999px; background: #e8f4ff; color: #0b5793; text-align: center; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>ThinkPHP 5.0.12 Entry Node</h1>
+    <p>This container is the DMZ entry point for the Docker Linux enterprise lab.</p>
+    <p>Framework line: <code>ThinkPHP 5.0.12</code></p>
+    <h2>Routes</h2>
+    <table>
+      <tr><th>Segment</th><th>Route</th></tr>
+      {volist name="routes" id="route"}
+      <tr><td>{$route.segment}</td><td><code>{$route.route}</code></td></tr>
+      {/volist}
+    </table>
+    <h2>Internal Services</h2>
+    <table>
+      <tr><th>Zone</th><th>Name</th><th>Address</th><th>Ports</th><th>Role</th></tr>
+      {volist name="services" id="service"}
+      <tr>
+        <td><span class="pill">{$service.zone}</span></td>
+        <td>{$service.name}</td>
+        <td><code>{$service.address}</code></td>
+        <td><code>{$service.ports}</code></td>
+        <td>{$service.role}</td>
+      </tr>
+      {/volist}
+    </table>
+  </main>
+</body>
+</html>

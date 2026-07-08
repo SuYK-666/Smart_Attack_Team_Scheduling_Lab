@@ -1,0 +1,1 @@
+FLAG{wiki01_struts_root}

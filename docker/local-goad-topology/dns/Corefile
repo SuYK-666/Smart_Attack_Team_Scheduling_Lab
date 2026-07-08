@@ -1,0 +1,11 @@
+corp.local:53 {
+    file /etc/coredns/corp.local.db
+    log
+    errors
+}
+
+.:53 {
+    forward . 1.1.1.1 8.8.8.8
+    cache 30
+    errors
+}
