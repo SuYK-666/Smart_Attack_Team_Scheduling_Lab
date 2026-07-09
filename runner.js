@@ -160,6 +160,24 @@ export class Runner {
     }
     p += `Flag 格式: ${this.config.flagPattern}\n\n`;
 
+    p += "授权范围边界（强制）：\n";
+    p += `- 当前公网入口授权目标为 ${this.config.targetHost}:${this.config.targetPort}，scope=${this.config.scopeMode}。\n`;
+    if (this.config.scopeMode === "entry-port") {
+      p += `- 公网入口层只允许访问 ${this.config.targetHost}:${this.config.targetPort}；同一公网 IP/域名的其他端口不属于本任务范围，不得扫描、访问、利用或读取 flag。\n`;
+      p += "- 如果发现同公网入口的其他端口，只能记录为 out-of-scope sibling port，并立即回到当前入口或已证实的内网目标。\n";
+    } else if (this.config.scopeMode === "public-host") {
+      p += `- 公网入口层允许访问 ${this.config.targetHost} 上的端口，但不得主动扩展到其他公网 IP/域名。\n`;
+    } else {
+      p += "- 当前 scope=open，公网扩展不做端口级限制；仍需遵守用户授权范围和靶场边界。\n";
+    }
+    if (this.config.allowPrivatePivot) {
+      p += "- 通过入口页面、RCE、SSRF、配置文件、内网 DNS、路由信息等证据发现的私网地址和内网域名允许继续验证。\n";
+      p += "- 私网范围包括 10.0.0.0/8、172.16.0.0/12、192.168.0.0/16、127.0.0.0/8、以及 .local/.lan/.internal/.corp 等内网域名。\n";
+    } else {
+      p += "- 当前禁止私网横向，不得访问入口之外的私网地址或内网域名。\n";
+    }
+    p += "- 总结时必须把越界发现标为 out-of-scope，不要把它作为有效攻击面或下一轮目标。\n\n";
+
     p += "本轮计划（强制执行边界）：\n";
     p += `- 当前轮次: ${context.loopIndex || this.runCount}\n`;
     p += `- 阶段标题: ${loopPlan.title}\n`;
@@ -203,6 +221,8 @@ export class Runner {
 
     p += "可用能力：\n";
     p += "- shell 工具链，以当前环境实际可用为准，例如 curl、nmap、gobuster、hydra、netcat、python。\n";
+    p += "- 当前 shell 可能是 zsh；不要在 shell 循环中使用 path 作为变量名，因为 zsh 的 path 是特殊变量，会覆盖 PATH 并导致 curl/nmap/python 等命令变成 command not found。循环变量请使用 item、target_path、route、name 等。\n";
+    p += "- 如果出现 curl/nmap/python 间歇性 command not found，优先检查是否在当前命令中覆盖了 PATH/path，而不是反复判断工具未安装。\n";
     p += "- 横向代理服务已启动时可使用，但只在本轮计划允许时使用。\n";
     p += `- 代理服务端: localhost:${this.config.proxyPort}\n`;
     p += `- 工具产物环境变量: PEN_AGENT_ARTIFACT_DIR=${this.config.artifactDir}\n`;

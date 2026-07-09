@@ -61,20 +61,34 @@ const topologyNodes = computed(() => {
     nodes.filter((node) => node.status === "service"),
   ].filter((group) => group.length);
   const width = 980;
-  const height = 430;
-  const yPositions = groups.length === 1
-    ? [height / 2]
-    : groups.map((_, index) => 72 + index * ((height - 144) / Math.max(1, groups.length - 1)));
+  const left = 88;
+  const usableWidth = width - left * 2;
+  const rowGap = 104;
+  const groupGap = 54;
+  let y = 70;
 
-  return groups.flatMap((group, groupIndex) => group.map((node, index) => {
-    const x = 90 + index * ((width - 180) / Math.max(1, group.length - 1));
-    return {
-      ...node,
-      x,
-      y: yPositions[groupIndex],
-      className: node.flagFound ? "flag" : node.accessGained ? "access" : node.status === "service" ? "service" : node.status === "entry" ? "entry" : "host",
-    };
-  }));
+  return groups.flatMap((group, groupIndex) => {
+    const maxPerRow = groupIndex === 0 ? 3 : groupIndex === 1 ? 7 : 8;
+    const rows = Math.ceil(group.length / maxPerRow);
+    const positioned = group.map((node, index) => {
+      const row = Math.floor(index / maxPerRow);
+      const rowStart = row * maxPerRow;
+      const rowLength = Math.min(maxPerRow, group.length - rowStart);
+      const col = index - rowStart;
+      const x = rowLength === 1
+        ? width / 2
+        : left + col * (usableWidth / Math.max(1, rowLength - 1));
+      return {
+        ...node,
+        x,
+        y: y + row * rowGap,
+        addressLabel: node.id === node.name ? "" : node.id,
+        className: node.flagFound ? "flag" : node.accessGained ? "access" : node.status === "service" ? "service" : node.status === "entry" ? "entry" : "host",
+      };
+    });
+    y += rows * rowGap + groupGap;
+    return positioned;
+  });
 });
 const topologyNodeMap = computed(() => new Map(topologyNodes.value.map((node) => [node.id, node])));
 const topologyEdges = computed(() => store.edges
@@ -98,6 +112,8 @@ const runForm = reactive({
   agent: "",
   attachUrl: "http://localhost:4096",
   pattern: "",
+  scopeMode: "entry-port",
+  allowPrivatePivot: true,
   apiKey: "",
   noAuto: false,
 });
@@ -118,6 +134,8 @@ const commandPreview = computed(() => {
   if (runForm.agent) args.push("--agent", runForm.agent);
   if (runForm.attachUrl) args.push("--attach", runForm.attachUrl);
   if (runForm.pattern) args.push("--pattern", runForm.pattern);
+  if (runForm.scopeMode) args.push("--scope", runForm.scopeMode);
+  if (!runForm.allowPrivatePivot) args.push("--no-private-pivot");
   if (runForm.noAuto) args.push("--no-auto");
   if (runForm.apiKey) args.push("--key", "******");
   return args.join(" ");
@@ -280,6 +298,18 @@ watch(
             <label class="field full">
               <span>目标地址</span>
               <input v-model="runForm.targetUrl" placeholder="http://node5.anna.nssctf.cn:23341" />
+            </label>
+            <label class="field">
+              <span>公网边界</span>
+              <select v-model="runForm.scopeMode">
+                <option value="entry-port">仅当前入口端口</option>
+                <option value="public-host">同公网主机端口</option>
+                <option value="open">开放边界</option>
+              </select>
+            </label>
+            <label class="check-field scope-check">
+              <input v-model="runForm.allowPrivatePivot" type="checkbox" />
+              <span>允许入口打通后的私网横向</span>
             </label>
             <label class="field">
               <span>最低 flag 数</span>
@@ -472,7 +502,7 @@ watch(
       <section v-else-if="active === 'assets'" class="panel">
         <h2>agent 探测资产</h2>
         <div class="topology-panel">
-          <svg viewBox="0 0 980 430" role="img" aria-label="资产拓扑图">
+          <svg viewBox="0 0 980 620" role="img" aria-label="资产拓扑图">
             <defs>
               <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
                 <path d="M 0 0 L 10 5 L 0 10 z"></path>
@@ -488,9 +518,10 @@ watch(
               :y2="edge.toNode?.y"
             />
             <g v-for="node in topologyNodes" :key="node.id" class="topology-node" :class="node.className" :transform="`translate(${node.x}, ${node.y})`">
-              <circle r="28"></circle>
-              <text y="48">{{ node.name.length > 18 ? `${node.name.slice(0, 18)}...` : node.name }}</text>
-              <text y="64" class="node-subtitle">{{ node.inferredZone || node.status || "node" }}</text>
+              <circle r="18"></circle>
+              <text y="32">{{ node.name.length > 18 ? `${node.name.slice(0, 18)}...` : node.name }}</text>
+              <text v-if="node.addressLabel" y="46" class="node-address">{{ node.addressLabel.length > 22 ? `${node.addressLabel.slice(0, 22)}...` : node.addressLabel }}</text>
+              <text :y="node.addressLabel ? 60 : 46" class="node-subtitle">{{ node.inferredZone || node.status || "node" }}</text>
             </g>
           </svg>
           <div class="topology-legend">

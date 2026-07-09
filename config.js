@@ -22,6 +22,8 @@ function parseArgs() {
     minLoops: 3,
     stopAfterStale: 2,
     proxyPort: 9999,
+    scopeMode: "entry-port",
+    allowPrivatePivot: true,
     flagPattern: /(?<![A-Za-z0-9_])(?=[A-Za-z0-9_]{2,32}\{)(?=[A-Za-z0-9_]*(?:ctf|flag))[A-Za-z0-9_]+\{[^}\s]{3,128}\}/gi,
   };
 
@@ -58,6 +60,12 @@ function parseArgs() {
         break;
       case "--proxy-port":
         config.proxyPort = parseInt(args[++i], 10);
+        break;
+      case "--scope":
+        config.scopeMode = args[++i];
+        break;
+      case "--no-private-pivot":
+        config.allowPrivatePivot = false;
         break;
       case "--work-dir":
         config.workDir = resolve(args[++i]);
@@ -118,6 +126,8 @@ Options:
   --min-loops <n>     Minimum loops before stale-stop is allowed (default: 3)
   --stop-after-stale <n> Stop after N loops with no new findings (default: 2)
   --proxy-port <n>    Proxy server port for lateral movement (default: 9999)
+  --scope <mode>      Public target scope: entry-port, public-host, open (default: entry-port)
+  --no-private-pivot  Disallow private/internal pivot targets discovered through the entry
   --artifact-dir <path> Directory for generated scripts/payloads/artifacts (default: ./artifacts)
   --pattern <regex>   Custom flag regex pattern
   --no-auto           Disable auto-approve permissions
@@ -153,6 +163,10 @@ function validate(config) {
     console.error("Error: --stop-after-stale must be at least 1");
     return false;
   }
+  if (!["entry-port", "public-host", "open"].includes(config.scopeMode)) {
+    console.error("Error: --scope must be one of: entry-port, public-host, open");
+    return false;
+  }
   return true;
 }
 
@@ -163,6 +177,8 @@ function dump(config) {
   console.log(`  Target:          ${config.target}`);
   console.log(`  Max loops:       ${config.maxLoops}`);
   console.log(`  Proxy port:      ${config.proxyPort}`);
+  console.log(`  Scope:           ${config.scopeMode}`);
+  console.log(`  Private pivot:   ${config.allowPrivatePivot}`);
   console.log(`  Model:           ${config.opencodeModel || "default"}`);
   console.log(`  Agent:           ${config.opencodeAgent || "default"}`);
   console.log(`  Auto approve:    ${config.opencodeAuto}`);

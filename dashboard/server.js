@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { createReadStream, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { extname, join, resolve } from "node:path";
+import { delimiter, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -111,6 +111,35 @@ function maskArgs(args) {
   return masked;
 }
 
+function buildToolPath() {
+  const extra = process.platform === "win32"
+    ? [
+        "C:\\Windows\\System32",
+        "C:\\Windows",
+        "C:\\Windows\\System32\\WindowsPowerShell\\v1.0",
+        "C:\\Program Files\\Git\\cmd",
+        "C:\\Program Files\\nodejs",
+      ]
+    : [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+      ];
+
+  const seen = new Set();
+  return [process.env.PATH || "", ...extra]
+    .flatMap((item) => item.split(delimiter))
+    .filter((item) => {
+      if (!item || seen.has(item)) return false;
+      seen.add(item);
+      return true;
+    })
+    .join(delimiter);
+}
+
 function startRun(body, res) {
   if (activeRun) return json(res, { error: "agent is already running", run: publicRun(activeRun) }, 409);
 
@@ -118,7 +147,10 @@ function startRun(body, res) {
   const child = spawn(process.execPath, args, {
     cwd: rootDir,
     stdio: ["ignore", "inherit", "inherit"],
-    env: process.env,
+    env: {
+      ...process.env,
+      PATH: buildToolPath(),
+    },
   });
   const run = {
     id: `${Date.now()}`,
@@ -174,6 +206,8 @@ function buildAgentArgs(body) {
   addStringArg(args, "--agent", body.agent, 80);
   addStringArg(args, "--attach", body.attachUrl, 240);
   addStringArg(args, "--pattern", body.pattern, 240);
+  addStringArg(args, "--scope", body.scopeMode || "entry-port", 40);
+  if (body.allowPrivatePivot === false) args.push("--no-private-pivot");
   if (body.noAuto) args.push("--no-auto");
   if (body.apiKey) addStringArg(args, "--key", body.apiKey, 512);
 
@@ -344,20 +378,42 @@ function findRelatedCommand(iter, flag) {
 function buildAssetGraph() {
   const state = readState();
   const flags = readJson(join(artifactDir, "flags.json"), { count: 0, flags: [] });
+  const aliases = collectAssetAliases();
+  const flagEvidence = collectFlagEvidence();
   const nodes = new Map();
   const edges = [];
   const target = state._config?.target || flags.target || "unknown-target";
-  addNode(nodes, target, { name: target, inferredZone: "external-entry", status: "entry" });
+  const targetIdentity = parseTargetIdentity(target);
+  const entryId = targetIdentity.entryId || target;
+  addNode(nodes, entryId, { name: target, inferredZone: "external-entry", status: "entry" });
 
   for (const iter of state.iterations || []) {
     for (const host of iter.hosts || []) {
-      addNode(nodes, host, { name: host, firstSeenIter: iter.iter, lastSeenIter: iter.iter });
-      addEdge(edges, target, host, "discovered-host", iter.iter, iter.summary);
+      const context = iterationText(iter);
+      const classified = classifyGraphHost(host, context, targetIdentity);
+      if (!classified) continue;
+      addNode(nodes, classified.id, {
+        name: displayNodeName(classified.id, classified.name, aliases),
+        inferredZone: classified.zone,
+        status: classified.status,
+        firstSeenIter: iter.iter,
+        lastSeenIter: iter.iter,
+      });
+      if (classified.id !== entryId) addEdge(edges, entryId, classified.id, classified.edgeType, iter.iter, iter.summary);
     }
     for (const service of iter.services || []) {
-      const host = service.host || target;
-      const serviceId = `${host}:${service.port || "?"}`;
-      addNode(nodes, host, { name: host, firstSeenIter: iter.iter, lastSeenIter: iter.iter });
+      const hostInfo = classifyGraphHost(service.host || entryId, iterationText(iter), targetIdentity) || { id: entryId, name: target, status: "entry", zone: "external-entry" };
+      const host = hostInfo.id;
+      const serviceId = hostInfo.status === "entry" && String(service.port || "") === String(targetIdentity.port || "")
+        ? `${host}/service`
+        : `${host}:${service.port || "?"}`;
+      addNode(nodes, host, {
+        name: displayNodeName(host, hostInfo.name, aliases),
+        inferredZone: hostInfo.zone,
+        status: hostInfo.status,
+        firstSeenIter: iter.iter,
+        lastSeenIter: iter.iter,
+      });
       addNode(nodes, serviceId, {
         name: serviceId,
         inferredZone: inferZone(service.name),
@@ -370,15 +426,210 @@ function buildAssetGraph() {
     }
     for (const call of iter.toolCalls || []) {
       for (const parsed of extractUrls(call.command || "")) {
-        addNode(nodes, parsed.host, { name: parsed.host, firstSeenIter: iter.iter, lastSeenIter: iter.iter });
-        addEdge(edges, target, parsed.host, "observed-request", iter.iter, call.command);
+        const classified = classifyGraphHost(parsed.host, call.command || "", targetIdentity);
+        if (!classified || classified.id === entryId) continue;
+        addNode(nodes, classified.id, {
+          name: displayNodeName(classified.id, classified.name, aliases),
+          inferredZone: classified.zone,
+          status: classified.status,
+          firstSeenIter: iter.iter,
+          lastSeenIter: iter.iter,
+        });
+        addEdge(edges, entryId, classified.id, "observed-request", iter.iter, call.command);
       }
     }
-    if ((iter.access || []).length) addNode(nodes, target, { accessGained: true, status: "access-gained" });
-    if ((iter.flags || []).length) addNode(nodes, target, { flagFound: true, status: "flag-found" });
+    for (const access of iter.access || []) {
+      const accessNode = resolveEvidenceNode(access, nodes, aliases, targetIdentity, entryId);
+      addNode(nodes, accessNode, { name: displayNodeName(accessNode, accessNode, aliases), accessGained: true, status: "access-gained" });
+    }
+    for (const flag of iter.flags || []) {
+      const evidence = [flag, iter.summary, findRelatedCommand(iter, flag), flagEvidence.get(flag)].filter(Boolean).join("\n");
+      const flagNode = resolveEvidenceNode(evidence, nodes, aliases, targetIdentity, entryId);
+      addNode(nodes, flagNode, { name: displayNodeName(flagNode, flagNode, aliases), flagFound: true, status: "flag-found" });
+    }
   }
 
   return { nodes: [...nodes.values()], edges };
+}
+
+function collectAssetAliases() {
+  const aliases = new Map();
+  const namesByIp = new Map();
+  const texts = [
+    readText(join(artifactDir, "notes", "flag_evidence.md")),
+    readText(join(artifactDir, "notes", "round1_summary.md")),
+    readText(join(artifactDir, "notes", "round2_summary.md")),
+    readText(join(artifactDir, "downloads", "entry_index_response.txt")),
+    readText(join(artifactDir, "downloads", "index.html")),
+  ].filter(Boolean);
+
+  for (const text of texts) {
+    for (const match of text.matchAll(/"host"\s*:\s*"([^"]+)"[\s\S]{0,120}?"ip"\s*:\s*"(\d{1,3}(?:\.\d{1,3}){3})"/g)) {
+      rememberAlias(aliases, namesByIp, match[1], match[2]);
+    }
+    for (const line of text.split(/\r?\n/)) {
+      const ip = line.match(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/)?.[1];
+      if (!ip) continue;
+      const name = line.match(/\|\s*`?([A-Za-z][\w-]{1,31})`?\s*\|/)?.[1]
+        || line.match(/\b([A-Za-z][\w-]{1,31})\s*\([^)]*\b\d{1,3}(?:\.\d{1,3}){3}/)?.[1]
+        || line.match(/<td>([A-Za-z][\w-]{1,31})<\/td>/)?.[1];
+      if (name && !/^(http|https|tcp|udp|root|flag|cmd|node|address|service)$/i.test(name)) {
+        rememberAlias(aliases, namesByIp, name, ip);
+      }
+    }
+  }
+
+  aliases.namesByIp = namesByIp;
+  return aliases;
+}
+
+function rememberAlias(aliases, namesByIp, name, ip) {
+  const cleanName = String(name || "").trim().toLowerCase();
+  const cleanIp = String(ip || "").trim();
+  if (!cleanName || !cleanIp) return;
+  aliases.set(cleanName, cleanIp);
+  if (!namesByIp.has(cleanIp)) namesByIp.set(cleanIp, cleanName);
+}
+
+function collectFlagEvidence() {
+  const evidence = new Map();
+  const texts = [
+    readText(join(artifactDir, "notes", "flag_evidence.md")),
+    readText(join(artifactDir, "notes", "round1_summary.md")),
+    readText(join(artifactDir, "notes", "round2_summary.md")),
+  ].filter(Boolean);
+  for (const text of texts) {
+    for (const match of text.matchAll(/FLAG\{[^}\s]{3,128}\}/g)) {
+      const start = Math.max(0, match.index - 400);
+      const end = Math.min(text.length, match.index + match[0].length + 500);
+      evidence.set(match[0], `${evidence.get(match[0]) || ""}\n${text.slice(start, end)}`);
+    }
+  }
+  return evidence;
+}
+
+function readText(path) {
+  try {
+    if (!existsSync(path)) return "";
+    return readFileSync(path, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+function displayNodeName(id, fallback, aliases) {
+  const name = aliases.namesByIp?.get(id);
+  return name || fallback || id;
+}
+
+function resolveEvidenceNode(text, nodes, aliases, targetIdentity, entryId) {
+  const evidence = String(text || "").toLowerCase();
+  const flagBody = evidence.match(/flag\{([^}\s]{3,128})\}/)?.[1] || "";
+
+  for (const [name, ip] of aliases.entries()) {
+    if (flagBody.includes(name)) return name === "thinkphp" ? entryId : ip;
+  }
+  if (/thinkphp|dmz|entry|入口/.test(flagBody)) return entryId;
+
+  for (const [name, ip] of aliases.entries()) {
+    if (name === "thinkphp") continue;
+    if (evidence.includes(name)) return nodes.has(ip) ? ip : ip;
+  }
+
+  if (/thinkphp|dmz|entry|入口/.test(evidence)) return entryId;
+
+  for (const id of nodes.keys()) {
+    const normalized = normalizeGraphHost(id);
+    if (normalized?.hostname && evidence.includes(normalized.hostname)) return id;
+  }
+
+  const ip = evidence.match(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/)?.[1];
+  if (ip) return nodes.has(ip) ? ip : ip;
+
+  if (targetIdentity.host && evidence.includes(targetIdentity.host)) return entryId;
+  return entryId;
+}
+
+function parseTargetIdentity(target) {
+  try {
+    const parsed = new URL(String(target));
+    return {
+      entryId: parsed.host,
+      host: parsed.hostname.toLowerCase(),
+      port: parsed.port || (parsed.protocol === "https:" ? "443" : "80"),
+    };
+  } catch {
+    const raw = String(target || "").trim();
+    const match = raw.match(/^([^:/\s]+)(?::(\d+))?/);
+    return {
+      entryId: match?.[2] ? `${match[1]}:${match[2]}` : raw,
+      host: (match?.[1] || raw).toLowerCase(),
+      port: match?.[2] || "",
+    };
+  }
+}
+
+function classifyGraphHost(value, context, targetIdentity) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const host = normalizeGraphHost(raw);
+  if (!host) return null;
+  if (isCidrNetworkHost(host, context)) return null;
+
+  if (host.hostname === targetIdentity.host) {
+    const samePort = !host.port || !targetIdentity.port || host.port === targetIdentity.port;
+    if (samePort) return { id: targetIdentity.entryId, name: targetIdentity.entryId, zone: "external-entry", status: "entry", edgeType: "entry" };
+  }
+
+  if (isRouteNextHop(host.hostname, context)) {
+    return { id: host.id, name: host.id, zone: "routing", status: "gateway", edgeType: "route" };
+  }
+
+  return { id: host.id, name: host.id, zone: inferHostZone(host.hostname), status: "discovered", edgeType: "discovered-host" };
+}
+
+function normalizeGraphHost(value) {
+  const trimmed = String(value || "").trim().replace(/^\[/, "").replace(/\]$/, "");
+  try {
+    const parsed = new URL(trimmed.includes("://") ? trimmed : `http://${trimmed}`);
+    const hostname = parsed.hostname.toLowerCase();
+    const port = parsed.port;
+    return { hostname, port, id: port ? `${hostname}:${port}` : hostname };
+  } catch {
+    const match = trimmed.match(/^([^:/\s]+)(?::(\d+))?/);
+    if (!match) return null;
+    const hostname = match[1].toLowerCase();
+    return { hostname, port: match[2] || "", id: match[2] ? `${hostname}:${match[2]}` : hostname };
+  }
+}
+
+function isCidrNetworkHost(host, context = "") {
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(host.hostname)) return false;
+  const parts = host.hostname.split(".").map((item) => Number(item));
+  if (parts[3] !== 0) return false;
+  return new RegExp(`${escapeRegExp(host.hostname)}\\/\\d{1,2}`).test(context);
+}
+
+function isRouteNextHop(hostname, context = "") {
+  return new RegExp(`\\b(?:via|gateway|gw|next-hop)\\s+${escapeRegExp(hostname)}\\b`, "i").test(context);
+}
+
+function inferHostZone(hostname) {
+  if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(hostname)) return "internal";
+  return "external";
+}
+
+function iterationText(iter) {
+  return [
+    iter.summary,
+    ...(iter.intel || []),
+    ...(iter.nextSteps || []),
+    ...(iter.analysisTrail || []).flatMap((item) => [item.hypothesis, item.action, item.evidence, item.decision]),
+  ].filter(Boolean).join("\n");
+}
+
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function addNode(nodes, id, patch) {

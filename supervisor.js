@@ -43,16 +43,16 @@ Rules:
 - Include failed attempts when visible.
 - Filter noise, but preserve important command evidence, URLs, credentials, upload paths, sessions, callbacks, and flags.`;
 
-export async function supervise(output) {
+export async function supervise(output, config = {}) {
   if (!output || output.trim().length < 50) {
-    return emptyFindings(output?.slice(0, 200) || "(empty)");
+    return filterFindingsByScope(emptyFindings(output?.slice(0, 200) || "(empty)"), config);
   }
 
   const cleaned = cleanOutput(output);
   const fallback = basicExtract(cleaned);
   const key = getApiKey();
   if (!key) {
-    return fallback;
+    return filterFindingsByScope(fallback, config);
   }
 
   const prompt = `${SYSTEM}
@@ -93,10 +93,10 @@ Return ONLY valid JSON (no markdown, no code fences):`;
     if (!jsonMatch) return fallback;
 
     const parsed = JSON.parse(jsonMatch[0]);
-    return mergeWithFallback(parsed, fallback);
+    return filterFindingsByScope(mergeWithFallback(parsed, fallback), config);
   } catch (err) {
     console.error(`[supervisor] LLM call failed: ${err.message}, falling back to local extraction`);
-    return fallback;
+    return filterFindingsByScope(fallback, config);
   }
 }
 
@@ -125,11 +125,131 @@ function mergeWithFallback(parsed, fallback) {
   };
 }
 
+function filterFindingsByScope(findings, config = {}) {
+  const scopeMode = config.scopeMode || "entry-port";
+  if (scopeMode === "open") return findings;
+
+  const targetHost = normalizeHost(config.targetHost || "");
+  const targetPort = Number(config.targetPort);
+  if (!targetHost || !targetPort) return findings;
+  const allowPrivatePivot = config.allowPrivatePivot !== false;
+  const outOfScope = [];
+
+  const newHosts = [];
+  for (const host of findings.newHosts || []) {
+    const decision = classifyHostScope(host, { targetHost, allowPrivatePivot, scopeMode });
+    if (decision.allowed) {
+      newHosts.push(host);
+    } else {
+      outOfScope.push(decision.reason);
+    }
+  }
+
+  const newServices = [];
+  for (const service of findings.newServices || []) {
+    const decision = classifyServiceScope(service, { targetHost, targetPort, allowPrivatePivot, scopeMode });
+    if (decision.allowed) {
+      newServices.push(service);
+    } else {
+      outOfScope.push(decision.reason);
+    }
+  }
+
+  const intel = (findings.intel || []).filter((item) => !containsOutOfScopePublicOrigin(item, { targetHost, targetPort, scopeMode }));
+  const nextSteps = (findings.nextSteps || []).filter((item) => !containsOutOfScopePublicOrigin(item, { targetHost, targetPort, scopeMode }));
+  if (intel.length !== (findings.intel || []).length) outOfScope.push(`已过滤提到 ${targetHost} 其他端口的情报`);
+  if (nextSteps.length !== (findings.nextSteps || []).length) outOfScope.push(`已过滤提到 ${targetHost} 其他端口的下一步建议`);
+
+  if (!outOfScope.length) {
+    return { ...findings, newHosts, newServices, intel, nextSteps };
+  }
+
+  const uniqueOut = [...new Set(outOfScope)].slice(0, 10);
+  return {
+    ...findings,
+    newHosts,
+    newServices,
+    intel,
+    nextSteps,
+    problems: [
+      ...(findings.problems || []),
+      {
+        symptom: "发现授权范围外公网目标",
+        cause: uniqueOut.join("; "),
+        resolution: "按当前 scope 忽略该公网目标，不纳入有效资产、服务或下一轮攻击面。",
+      },
+    ],
+  };
+}
+
+function containsOutOfScopePublicOrigin(text, policy) {
+  if (policy.scopeMode !== "entry-port" || !policy.targetHost || !policy.targetPort) return false;
+  const pattern = new RegExp(`${escapeRegExp(policy.targetHost)}:(\\d{1,5})`, "i");
+  const match = String(text || "").match(pattern);
+  return Boolean(match && Number(match[1]) !== policy.targetPort);
+}
+
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function classifyHostScope(host, policy) {
+  const normalized = normalizeHost(host);
+  if (!normalized) return { allowed: false, reason: `空主机名 ${host}` };
+  if (policy.scopeMode === "public-host" && normalized === policy.targetHost) return { allowed: true };
+  if (normalized === policy.targetHost) return { allowed: true };
+  if (policy.allowPrivatePivot && isPrivateOrInternalHost(normalized)) return { allowed: true };
+  return { allowed: false, reason: `${host} 不在公网入口 ${policy.targetHost} 范围内` };
+}
+
+function classifyServiceScope(service, policy) {
+  const host = normalizeHost(service.host || "");
+  const port = Number(service.port);
+  if (!host) return { allowed: true };
+  if (policy.scopeMode === "public-host" && host === policy.targetHost) return { allowed: true };
+  if (host === policy.targetHost) {
+    if (policy.scopeMode === "entry-port" && port && port !== policy.targetPort) {
+      return { allowed: false, reason: `${host}:${port} 是同公网入口的其他端口，当前仅授权 ${host}:${policy.targetPort}` };
+    }
+    return { allowed: true };
+  }
+  if (policy.allowPrivatePivot && isPrivateOrInternalHost(host)) return { allowed: true };
+  return { allowed: false, reason: `${host}:${port || "?"} 不在公网入口 ${policy.targetHost}:${policy.targetPort} 范围内` };
+}
+
+function normalizeHost(host) {
+  return String(host || "")
+    .trim()
+    .replace(/^\[/, "")
+    .replace(/\]$/, "")
+    .toLowerCase();
+}
+
+function isPrivateOrInternalHost(host) {
+  if (/^(localhost|.+\.(local|lan|internal|corp))$/i.test(host)) return true;
+  const parts = host.split(".").map((item) => Number(item));
+  if (parts.length !== 4 || parts.some((item) => !Number.isInteger(item) || item < 0 || item > 255)) return false;
+  const [a, b] = parts;
+  return (
+    a === 10 ||
+    a === 127 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+  );
+}
+
 function basicExtract(output) {
   const flags = [...new Set([...output.matchAll(/(?<![A-Za-z0-9_])(?=[A-Za-z0-9_]{2,32}\{)(?=[A-Za-z0-9_]*(?:ctf|flag))[A-Za-z0-9_]+\{[^}\s]{3,128}\}/gi)].map((m) => m[0]))];
   const hosts = [];
-  for (const m of output.matchAll(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/g)) {
-    if (!hosts.includes(m[1]) && !m[1].startsWith("0.") && !m[1].startsWith("127.0.0.1")) hosts.push(m[1]);
+  for (const m of output.matchAll(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(\/\d{1,2})?/g)) {
+    const host = m[1];
+    if (
+      !m[2] &&
+      !isNetworkAddressInOutput(host, output, m.index || 0) &&
+      !hosts.includes(host) &&
+      !host.startsWith("0.") &&
+      !host.startsWith("127.0.0.1")
+    ) hosts.push(host);
   }
 
   const creds = [];
@@ -165,6 +285,15 @@ function basicExtract(output) {
     newAccess: [],
     intel: extractIntel(output),
   };
+}
+
+function isNetworkAddressInOutput(host, output, index) {
+  const parts = host.split(".").map((item) => Number(item));
+  if (parts.length !== 4 || parts.some((item) => !Number.isInteger(item))) return false;
+  if (parts[3] !== 0) return false;
+
+  const context = output.slice(Math.max(0, index - 8), index + host.length + 8);
+  return new RegExp(`${escapeRegExp(host)}\\/\\d{1,2}`).test(context);
 }
 
 function inferNextSteps(flags, problems) {
@@ -251,6 +380,13 @@ function extractProblems(output) {
   if (/timed out/i.test(output)) problems.push({ symptom: "命令或连接超时", cause: "目标服务无响应或交互协议不匹配", resolution: "切换请求方式、延长超时或更换攻击面" });
   if (/Invalid File|You was catched|Forbidden|404 Not Found/i.test(output)) problems.push({ symptom: "上传、访问或目录探测被拒绝", cause: "服务端存在后缀、内容或路径限制", resolution: "尝试 MIME、后缀、内容魔术头、路径和解析差异绕过" });
   if (/数据库错误/i.test(output)) problems.push({ symptom: "数据库错误页面", cause: "SQL payload 触发异常或列数/函数不匹配", resolution: "调整列数、函数和数据库方言继续验证" });
+  if (/for\s+path\s+in[\s\S]{0,800}command not found: curl/i.test(output)) {
+    problems.push({
+      symptom: "curl 在 zsh 循环中变成 command not found",
+      cause: "命令使用了 zsh 特殊变量 path 作为循环变量，覆盖了 PATH，导致后续命令查找路径丢失",
+      resolution: "不要使用 path 作为变量名，改用 item、target_path、route、name 等；必要时在命令前重新设置 PATH",
+    });
+  }
   problems.push(...extractProtocolBlockers(output));
   return problems;
 }

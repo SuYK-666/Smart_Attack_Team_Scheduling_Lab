@@ -21,6 +21,8 @@ export async function startAgent(config) {
   whiteboard.setConfig("flagJsonPath", flagStore.jsonPath);
   whiteboard.setConfig("flagTextPath", flagStore.textPath);
   whiteboard.setConfig("maxFlags", config.maxFlags ?? "unlimited");
+  whiteboard.setConfig("scopeMode", config.scopeMode);
+  whiteboard.setConfig("allowPrivatePivot", config.allowPrivatePivot);
   whiteboard.setFlagCount(0, config.flagsNeeded);
 
   await proxy.start().catch((e) => {
@@ -77,7 +79,7 @@ export async function startAgent(config) {
     const output = (result.output || "") + (result.stderr ? "\n" + result.stderr : "");
 
     console.log(chalk.gray("[supervisor] extracting structured findings from raw output..."));
-    const findings = await supervise(output);
+    const findings = await supervise(output, config);
 
     whiteboard.recordIteration(findings);
     prevSummary = findings.summary;
