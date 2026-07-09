@@ -3,6 +3,8 @@ import { join } from "node:path";
 import os from "node:os";
 
 const API_URL = "https://api.deepseek.com/v1/chat/completions";
+const FLAG_PATTERN = /(?<![A-Za-z0-9_])(?=[A-Za-z0-9_]{2,32}\{)(?=[A-Za-z0-9_]*(?:ctf|flag))[A-Za-z0-9_]+\{[^}\s]{3,128}\}/gi;
+const COMMON_FLAG_FORMAT = /^([A-Za-z0-9_]{2,32})\{([A-Za-z0-9][A-Za-z0-9_\-+=/@:.,!?#$%&*]{2,127})\}$/i;
 
 function getApiKey() {
   try {
@@ -109,7 +111,7 @@ function cleanOutput(output) {
 function mergeWithFallback(parsed, fallback) {
   return {
     summary: parsed.summary || fallback.summary,
-    newFlags: mergeUnique(parsed.newFlags, fallback.newFlags),
+    newFlags: sanitizeFlags(mergeUnique(parsed.newFlags, fallback.newFlags)),
     newHosts: mergeUnique(parsed.newHosts, fallback.newHosts),
     newServices: parsed.newServices?.length ? parsed.newServices : fallback.newServices,
     newCredentials: parsed.newCredentials?.length ? parsed.newCredentials : fallback.newCredentials,
@@ -138,6 +140,7 @@ function filterFindingsByScope(findings, config = {}) {
   const newHosts = [];
   for (const host of findings.newHosts || []) {
     const decision = classifyHostScope(host, { targetHost, allowPrivatePivot, scopeMode });
+    if (decision.ignore) continue;
     if (decision.allowed) {
       newHosts.push(host);
     } else {
@@ -148,6 +151,7 @@ function filterFindingsByScope(findings, config = {}) {
   const newServices = [];
   for (const service of findings.newServices || []) {
     const decision = classifyServiceScope(service, { targetHost, targetPort, allowPrivatePivot, scopeMode });
+    if (decision.ignore) continue;
     if (decision.allowed) {
       newServices.push(service);
     } else {
@@ -196,6 +200,7 @@ function escapeRegExp(text) {
 function classifyHostScope(host, policy) {
   const normalized = normalizeHost(host);
   if (!normalized) return { allowed: false, reason: `空主机名 ${host}` };
+  if (isNoisyHostToken(normalized)) return { ignore: true };
   if (policy.scopeMode === "public-host" && normalized === policy.targetHost) return { allowed: true };
   if (normalized === policy.targetHost) return { allowed: true };
   if (policy.allowPrivatePivot && isPrivateOrInternalHost(normalized)) return { allowed: true };
@@ -206,6 +211,7 @@ function classifyServiceScope(service, policy) {
   const host = normalizeHost(service.host || "");
   const port = Number(service.port);
   if (!host) return { allowed: true };
+  if (isNoisyHostToken(host)) return { ignore: true };
   if (policy.scopeMode === "public-host" && host === policy.targetHost) return { allowed: true };
   if (host === policy.targetHost) {
     if (policy.scopeMode === "entry-port" && port && port !== policy.targetPort) {
@@ -238,14 +244,23 @@ function isPrivateOrInternalHost(host) {
   );
 }
 
+function isNoisyHostToken(host) {
+  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return false;
+  if (!isValidIPv4(host)) return true;
+  const parts = host.split(".").map((item) => Number(item));
+  return parts[0] <= 2 && parts[1] <= 40;
+}
+
 function basicExtract(output) {
-  const flags = [...new Set([...output.matchAll(/(?<![A-Za-z0-9_])(?=[A-Za-z0-9_]{2,32}\{)(?=[A-Za-z0-9_]*(?:ctf|flag))[A-Za-z0-9_]+\{[^}\s]{3,128}\}/gi)].map((m) => m[0]))];
+  const flags = sanitizeFlags([...new Set([...output.matchAll(FLAG_PATTERN)].map((m) => m[0]))]);
   const hosts = [];
-  for (const m of output.matchAll(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(\/\d{1,2})?/g)) {
+  for (const m of output.matchAll(/(?<![\d.])(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(\/\d{1,2})?(?![\d.])/g)) {
     const host = m[1];
     if (
+      isValidIPv4(host) &&
       !m[2] &&
       !isNetworkAddressInOutput(host, output, m.index || 0) &&
+      !isLikelyOidOrVersion(host, output, m.index || 0) &&
       !hosts.includes(host) &&
       !host.startsWith("0.") &&
       !host.startsWith("127.0.0.1")
@@ -285,6 +300,33 @@ function basicExtract(output) {
     newAccess: [],
     intel: extractIntel(output),
   };
+}
+
+function sanitizeFlags(values = []) {
+  return [...new Set((Array.isArray(values) ? values : []).filter(isCommonFlag))];
+}
+
+function isCommonFlag(flag) {
+  const match = String(flag || "").match(COMMON_FLAG_FORMAT);
+  if (!match) return false;
+  const prefix = match[1];
+  const inner = match[2].toLowerCase();
+  if (!/(ctf|flag)/i.test(prefix)) return false;
+  if (/^(flag|yourflag|your_flag|example|test|placeholder|redacted|todo)$/.test(inner)) return false;
+  if (/^x{3,}$/i.test(inner) || /^\.+$/.test(inner)) return false;
+  return true;
+}
+
+function isValidIPv4(host) {
+  const parts = String(host).split(".").map((item) => Number(item));
+  return parts.length === 4 && parts.every((item) => Number.isInteger(item) && item >= 0 && item <= 255);
+}
+
+function isLikelyOidOrVersion(host, output, index) {
+  const context = output.slice(Math.max(0, index - 40), index + host.length + 40);
+  if (/\b(?:oid|objectidentifier|object identifier|asn\.?1|ber|ldap|schema|2\.5\.|1\.2\.840|1\.3\.6\.1)\b/i.test(context)) return true;
+  const parts = host.split(".").map((item) => Number(item));
+  return parts[0] <= 2 && parts[1] <= 40 && /(?:ldap|oid|asn|schema|objectclass|attribute)/i.test(context);
 }
 
 function isNetworkAddressInOutput(host, output, index) {

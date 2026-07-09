@@ -157,6 +157,10 @@ button:disabled {
   grid-column: span 2;
 }
 
+.overview-full {
+  grid-column: 1 / -1;
+}
+
 .start-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.7fr);
@@ -607,11 +611,12 @@ code {
   border: 1px solid rgba(255, 255, 255, 0.72);
   border-radius: 20px;
   background: rgba(248, 250, 252, 0.48);
-  overflow: hidden;
+  overflow: auto;
 }
 
 .topology-panel svg {
   width: 100%;
+  height: auto;
   min-height: 480px;
   display: block;
 }

@@ -284,37 +284,24 @@ opencode 认证文件通常位于：
 
 推荐使用 `opencode auth login` 创建，也可以在启动 `pen-agent` 时通过 `-k` 自动写入。
 
-### Skills
+### Skills — `~/.config/opencode/skills/`
 
-如果使用渗透测试技能库，通常安装在：
+来源于 [yaklang/hack-skills](https://github.com/yaklang/hack-skills)（102 个渗透技能），安装在全局 opencode skills 目录，通过原生 `skill` 工具按需加载。
 
-```text
+```
 ~/.config/opencode/skills/
+├── sqli-sql-injection/SKILL.md
+├── xss-cross-site-scripting/SKILL.md
+├── path-traversal-lfi/SKILL.md
+├── cmdi-command-injection/SKILL.md
+├── linux-privilege-escalation/SKILL.md
+├── reverse-shell-techniques/SKILL.md
+├── tunneling-and-pivoting/SKILL.md
+├── recon-and-methodology/SKILL.md
+└── ... (共102个)
 ```
 
-典型结构：
-
-```text
-~/.config/opencode/skills/
-├── recon-and-methodology/
-│   └── SKILL.md
-├── sqli-sql-injection/
-│   └── SKILL.md
-├── xss-cross-site-scripting/
-│   └── SKILL.md
-├── path-traversal-lfi/
-│   └── SKILL.md
-├── cmdi-command-injection/
-│   └── SKILL.md
-├── linux-privilege-escalation/
-│   └── SKILL.md
-├── reverse-shell-techniques/
-│   └── SKILL.md
-└── tunneling-and-pivoting/
-    └── SKILL.md
-```
-
-注意：skill 目录名应与 `SKILL.md` 中的 `name` 字段保持一致，通常使用小写字母和连字符。
+**重要**：skill 目录名必须与 `SKILL.md` 中的 `name` 字段一致，格式为小写字母+连字符。
 
 ### 会话数据库与模型刷新
 

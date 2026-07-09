@@ -61,14 +61,14 @@ const topologyNodes = computed(() => {
     nodes.filter((node) => node.status === "service"),
   ].filter((group) => group.length);
   const width = 980;
-  const left = 88;
+  const left = 132;
   const usableWidth = width - left * 2;
-  const rowGap = 104;
-  const groupGap = 54;
-  let y = 70;
+  const rowGap = 108;
+  const groupGap = 64;
+  let y = 66;
 
   return groups.flatMap((group, groupIndex) => {
-    const maxPerRow = groupIndex === 0 ? 3 : groupIndex === 1 ? 7 : 8;
+    const maxPerRow = groupIndex === 0 ? 3 : groupIndex === 1 ? 5 : 6;
     const rows = Math.ceil(group.length / maxPerRow);
     const positioned = group.map((node, index) => {
       const row = Math.floor(index / maxPerRow);
@@ -89,6 +89,10 @@ const topologyNodes = computed(() => {
     y += rows * rowGap + groupGap;
     return positioned;
   });
+});
+const topologyHeight = computed(() => {
+  const maxY = Math.max(0, ...topologyNodes.value.map((node) => node.y || 0));
+  return Math.max(620, Math.ceil(maxY + 96));
 });
 const topologyNodeMap = computed(() => new Map(topologyNodes.value.map((node) => [node.id, node])));
 const topologyEdges = computed(() => store.edges
@@ -414,7 +418,7 @@ watch(
           <span>工具调用</span>
           <strong>{{ store.toolCallCount }}</strong>
         </article>
-        <article class="panel overview-pair overview-focus">
+        <article class="panel overview-pair overview-focus overview-full">
           <div class="section-title compact">
             <div>
               <h2>当前攻击位置</h2>
@@ -432,7 +436,7 @@ watch(
             <li v-for="item in latest?.nextSteps || []" :key="item">{{ item }}</li>
           </ul>
         </article>
-        <article class="panel overview-pair">
+        <article class="panel overview-pair overview-full">
           <h2>已成功攻击</h2>
           <div v-if="successfulAttacks.length" class="success-list">
             <article v-for="item in successfulAttacks" :key="item.iter" class="success-item">
@@ -502,7 +506,7 @@ watch(
       <section v-else-if="active === 'assets'" class="panel">
         <h2>agent 探测资产</h2>
         <div class="topology-panel">
-          <svg viewBox="0 0 980 620" role="img" aria-label="资产拓扑图">
+          <svg :viewBox="`0 0 980 ${topologyHeight}`" :style="{ aspectRatio: `980 / ${topologyHeight}` }" role="img" aria-label="资产拓扑图">
             <defs>
               <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
                 <path d="M 0 0 L 10 5 L 0 10 z"></path>
