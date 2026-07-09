@@ -275,7 +275,8 @@ function basicExtract(output) {
 
   const creds = [];
   for (const m of output.matchAll(/([A-Za-z0-9_.-]{2,32}):([a-f0-9]{16,64}|[^\s<>"']{3,64})/g)) {
-    creds.push({ username: m[1], password: m[2] });
+    const credential = { username: m[1], password: m[2] };
+    if (isLikelyCredential(credential, output, m.index || 0)) creds.push(credential);
   }
 
   const toolCalls = extractToolCalls(output);
@@ -584,6 +585,24 @@ function dedupeCreds(creds) {
     seen.add(key);
     return true;
   });
+}
+
+function isLikelyCredential(credential, output, index) {
+  const username = String(credential.username || "");
+  const password = String(credential.password || "");
+  const pair = `${username}:${password}`;
+  const context = output.slice(Math.max(0, index - 80), index + pair.length + 80);
+
+  if (!username || !password) return false;
+  if (/^(https?|ftp|smb|redis|jdbc|postgresql|mysql|mongodb|ldap)$/i.test(username)) return false;
+  if (/^(http|https|content-type|user-agent|accept|host|location|href|src|url|path|font-family|background|color|width|height|margin|padding|border|class|style)$/i.test(username)) return false;
+  if (/^[a-f0-9]{8,}$/i.test(username) && /^[a-f0-9]{8,}$/i.test(password)) return false;
+  if (/^(\/\/|\/|#|\.|,|;|\)|\]|\})/.test(password)) return false;
+  if (/[{};]/.test(username) || /[{};]/.test(password)) return false;
+  if (/https?:\/\/|:\/\/|font-family|stylesheet|stack trace|exception|traceback|content-type|charset|<[^>]+>/i.test(context)) return false;
+  if (/\b(?:password|passwd|pwd|user|username|login|credential|secret|token|access_key|secret_key|admin|root|redis|mysql|ldap|ssh|ftp|minio|aws)\b/i.test(context)) return true;
+  if (/^[A-Za-z0-9_.-]{2,32}$/.test(username) && password.length >= 6 && /[A-Za-z]/.test(username) && /[A-Za-z0-9]/.test(password)) return true;
+  return false;
 }
 
 function emptyFindings(summary) {

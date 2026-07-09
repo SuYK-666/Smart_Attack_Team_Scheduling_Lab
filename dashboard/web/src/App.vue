@@ -11,7 +11,6 @@ const nav = [
   ["overview", "总览"],
   ["assets", "资产拓扑"],
   ["timeline", "攻击时间线"],
-  ["findings", "发现结果"],
   ["tools", "工具与证据"],
   ["flags", "Flags"],
   ["notes", "分析笔记"],
@@ -21,6 +20,7 @@ const nav = [
 
 const latest = computed(() => store.latestIteration);
 const phaseClass = computed(() => `phase-${store.effectivePhase}`);
+const selectedHistoryRun = computed(() => (store.history || []).find((run) => run.id === store.selectedRunId));
 const successfulAttacks = computed(() => {
   return store.iterations
     .filter((item) => (item.flags || []).length || (item.access || []).length)
@@ -57,8 +57,7 @@ const topologyNodes = computed(() => {
   const nodes = store.assets.slice(0, 40);
   const groups = [
     nodes.filter((node) => node.inferredZone === "external-entry" || node.status === "entry"),
-    nodes.filter((node) => node.inferredZone !== "external-entry" && node.status !== "service" && node.status !== "entry"),
-    nodes.filter((node) => node.status === "service"),
+    nodes.filter((node) => node.inferredZone !== "external-entry" && node.status !== "entry"),
   ].filter((group) => group.length);
   const width = 980;
   const left = 132;
@@ -167,6 +166,16 @@ function portFromUrl(input: string) {
 async function startRun() {
   await store.startRun({ ...runForm });
   if (!store.actionError) active.value = "overview";
+}
+
+async function openHistoryRun(runId: string) {
+  await store.selectRun(runId);
+  active.value = "overview";
+}
+
+async function showCurrentRun() {
+  await store.showCurrentRun();
+  active.value = "overview";
 }
 
 function escapeHtml(text: string) {
@@ -278,12 +287,29 @@ watch(
     </aside>
 
     <main class="content">
-      <header class="topbar">
+      <header class="topbar" :class="{ 'overview-topbar': active === 'overview' }">
         <div>
           <h1>{{ nav.find(([key]) => key === active)?.[1] }}</h1>
           <p>{{ store.target }}</p>
         </div>
-        <div class="status-pill" :class="phaseClass">{{ store.effectivePhase }}</div>
+        <div v-if="active === 'overview'" class="topbar-status">
+          <div class="status-pill" :class="phaseClass">{{ store.effectivePhase }}</div>
+          <dl>
+            <div>
+              <dt>阶段</dt>
+              <dd>{{ store.status.plan || "无" }}</dd>
+            </div>
+            <div>
+              <dt>输出</dt>
+              <dd>{{ store.status.bytes || 0 }} bytes</dd>
+            </div>
+            <div>
+              <dt>更新时间</dt>
+              <dd>{{ store.lastRefresh || "-" }}</dd>
+            </div>
+          </dl>
+        </div>
+        <div v-else class="status-pill" :class="phaseClass">{{ store.effectivePhase }}</div>
       </header>
 
       <section v-if="active === 'start'" class="start-layout">
@@ -376,18 +402,41 @@ watch(
         </article>
 
         <aside class="panel run-panel">
-          <h2>当前任务</h2>
+          <div class="section-title compact">
+            <div>
+              <h2>当前任务</h2>
+              <p v-if="store.viewingHistory">正在查看历史：{{ selectedHistoryRun?.target || store.selectedRunId }}</p>
+              <p v-else>实时运行状态</p>
+            </div>
+            <button v-if="store.viewingHistory" class="mini-button" type="button" @click="showCurrentRun">当前</button>
+          </div>
           <dl>
             <dt>状态</dt><dd>{{ store.run.active?.status || (store.run.running ? "running" : "idle") }}</dd>
             <dt>PID</dt><dd>{{ store.run.active?.pid || "-" }}</dd>
             <dt>目标</dt><dd>{{ store.run.active?.target || store.target }}</dd>
             <dt>开始时间</dt><dd>{{ store.run.active?.startedAt || "-" }}</dd>
           </dl>
-          <h3>最近任务</h3>
-          <ul class="recent-runs">
-            <li v-for="run in store.run.recent || []" :key="run.id">
-              <strong>{{ run.status }}</strong>
-              <span>{{ run.target || "-" }}</span>
+          <div class="history-head">
+            <h3>历史任务</h3>
+            <span>{{ store.history?.length || 0 }} 条</span>
+          </div>
+          <ul class="recent-runs history-runs">
+            <li
+              v-for="run in store.history || []"
+              :key="run.id"
+              :class="{ active: store.selectedRunId === run.id }"
+              @click="openHistoryRun(run.id)"
+            >
+              <div>
+                <strong>{{ run.target || "unknown target" }}</strong>
+                <span>{{ run.status || "archived" }} · {{ run.flagsFound || 0 }} flags · {{ run.iterations || 0 }} 轮</span>
+              </div>
+              <small>{{ run.startedAt ? new Date(run.startedAt).toLocaleString() : run.id }}</small>
+              <p v-if="run.summary">{{ run.summary }}</p>
+            </li>
+            <li v-if="!(store.history || []).length" class="empty-history">
+              <strong>暂无历史任务</strong>
+              <span>新任务结束后会自动保存快照。</span>
             </li>
           </ul>
         </aside>
@@ -396,7 +445,7 @@ watch(
       <section v-else-if="active === 'overview'" class="grid overview-grid">
         <article class="metric">
           <span>当前轮次</span>
-          <strong>{{ store.state.iteration || store.status.iter || 0 }}</strong>
+          <strong>{{ store.currentIteration }}</strong>
         </article>
         <article class="metric">
           <span>Flags</span>
@@ -418,7 +467,7 @@ watch(
           <span>工具调用</span>
           <strong>{{ store.toolCallCount }}</strong>
         </article>
-        <article class="panel overview-pair overview-focus overview-full">
+        <article class="panel overview-pair overview-focus overview-full overview-position">
           <div class="section-title compact">
             <div>
               <h2>当前攻击位置</h2>
@@ -436,7 +485,17 @@ watch(
             <li v-for="item in latest?.nextSteps || []" :key="item">{{ item }}</li>
           </ul>
         </article>
-        <article class="panel overview-pair overview-full">
+        <article class="panel overview-pair overview-flag-status">
+          <h2>Flag 获取情况</h2>
+          <ul v-if="flagSources.length" class="compact-list">
+            <li v-for="flag in flagSources" :key="flag.value">
+              <code>{{ flag.value }}</code>
+              <span>{{ flag.source || flag.evidence?.method || "来源待确认" }}</span>
+            </li>
+          </ul>
+          <p v-else>尚未识别到 flag。</p>
+        </article>
+        <article class="panel overview-pair overview-full overview-success">
           <h2>已成功攻击</h2>
           <div v-if="successfulAttacks.length" class="success-list">
             <article v-for="item in successfulAttacks" :key="item.iter" class="success-item">
@@ -451,24 +510,6 @@ watch(
             </article>
           </div>
           <p v-else>暂未记录成功利用或 flag。</p>
-        </article>
-        <article class="panel overview-pair">
-          <h2>运行状态</h2>
-          <dl>
-            <dt>阶段</dt><dd>{{ store.status.plan || "无" }}</dd>
-            <dt>输出</dt><dd>{{ store.status.bytes || 0 }} bytes</dd>
-            <dt>更新时间</dt><dd>{{ store.lastRefresh || "-" }}</dd>
-          </dl>
-        </article>
-        <article class="panel overview-pair">
-          <h2>Flag 获取情况</h2>
-          <ul v-if="flagSources.length" class="compact-list">
-            <li v-for="flag in flagSources" :key="flag.value">
-              <code>{{ flag.value }}</code>
-              <span>{{ flag.source || flag.evidence?.method || "来源待确认" }}</span>
-            </li>
-          </ul>
-          <p v-else>尚未识别到 flag。</p>
         </article>
         <article class="panel overview-pair">
           <h2>最近攻击动作</h2>
@@ -570,22 +611,6 @@ watch(
         </article>
       </section>
 
-      <section v-else-if="active === 'findings'" class="panel">
-        <h2>结构化发现</h2>
-        <table>
-          <thead><tr><th>轮次</th><th>Hosts</th><th>Services</th><th>Credentials</th><th>Intel</th></tr></thead>
-          <tbody>
-            <tr v-for="item in store.iterations" :key="item.iter">
-              <td>{{ item.iter }}</td>
-              <td>{{ (item.hosts || []).join(', ') || '-' }}</td>
-              <td>{{ (item.services || []).map(s => `${s.host || '?'}:${s.port || '?'} ${s.name || ''}`).join('; ') || '-' }}</td>
-              <td>{{ (item.credentials || []).map(c => `${c.username || '?'}@${c.host || c.service || '?'}`).join('; ') || '-' }}</td>
-              <td>{{ (item.intel || []).join('; ') || '-' }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
-
       <section v-else-if="active === 'tools'" class="panel">
         <h2>工具调用</h2>
         <table>
@@ -655,7 +680,7 @@ watch(
         </article>
       </section>
 
-      <section v-else-if="active === 'teams'" class="panel">
+      <section v-else-if="active === 'teams'" class="panel team-panel">
         <div class="section-title compact">
           <div>
             <h2>团队协同</h2>

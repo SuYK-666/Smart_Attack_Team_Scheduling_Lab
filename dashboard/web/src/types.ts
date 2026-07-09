@@ -94,6 +94,9 @@ export interface RunRecord {
   signal?: string | null;
   status?: "running" | "stopping" | "completed" | "failed";
   target?: string;
+  flagsFound?: number;
+  iterations?: number;
+  summary?: string;
 }
 
 export interface NoteFile {

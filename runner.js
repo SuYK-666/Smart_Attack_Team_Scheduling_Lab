@@ -6,6 +6,25 @@ import chalk from "chalk";
 
 const PROMPT_FILE = ".pen-agent/prompt.txt";
 const MAX_PROMPT_LEN = 16000;
+const HISTORY_PROMPT_BUDGET = 6500;
+const LAST_OUTPUT_BUDGET = 1800;
+const POSIX_FALLBACK_PATHS = [
+  "/opt/homebrew/bin",
+  "/opt/homebrew/sbin",
+  "/usr/local/bin",
+  "/usr/local/sbin",
+  "/usr/bin",
+  "/bin",
+  "/usr/sbin",
+  "/sbin",
+];
+const WINDOWS_FALLBACK_PATHS = [
+  "C:\\Windows\\System32",
+  "C:\\Windows",
+  "C:\\Windows\\System32\\WindowsPowerShell\\v1.0",
+  "C:\\Program Files\\Git\\cmd",
+  "C:\\Program Files\\Git\\usr\\bin",
+];
 
 export class Runner {
   constructor(config) {
@@ -59,21 +78,13 @@ export class Runner {
 
       appendFileSync(logPath, `\n[iter ${this.runCount}] start ${new Date().toISOString()}\n`);
       appendFileSync(logPath, `[iter ${this.runCount}] command ${opencodeCmd} ${args.join(" ")}\n`);
+      const env = this._buildRunnerEnv();
 
       const child = spawn(opencodeCmd, args, {
         cwd: this.config.workDir,
         stdio: ["ignore", "pipe", "pipe"],
         shell: false,
-        env: {
-          ...process.env,
-          FORCE_COLOR: "0",
-          NO_COLOR: "1",
-          PEN_AGENT_ARTIFACT_DIR: this.config.artifactDir,
-          PEN_AGENT_SCRIPTS_DIR: join(this.config.artifactDir, "scripts"),
-          PEN_AGENT_PAYLOADS_DIR: join(this.config.artifactDir, "payloads"),
-          PEN_AGENT_DOWNLOADS_DIR: join(this.config.artifactDir, "downloads"),
-          PEN_AGENT_NOTES_DIR: join(this.config.artifactDir, "notes"),
-        },
+        env,
       });
 
       let output = "";
@@ -108,6 +119,31 @@ export class Runner {
     });
   }
 
+  _buildRunnerEnv() {
+    const env = {
+      ...process.env,
+      FORCE_COLOR: "0",
+      NO_COLOR: "1",
+      PEN_AGENT_ARTIFACT_DIR: this.config.artifactDir,
+      PEN_AGENT_SCRIPTS_DIR: join(this.config.artifactDir, "scripts"),
+      PEN_AGENT_PAYLOADS_DIR: join(this.config.artifactDir, "payloads"),
+      PEN_AGENT_DOWNLOADS_DIR: join(this.config.artifactDir, "downloads"),
+      PEN_AGENT_NOTES_DIR: join(this.config.artifactDir, "notes"),
+    };
+
+    if (process.platform === "win32") {
+      env.Path = mergePathEntries(env.Path || env.PATH, WINDOWS_FALLBACK_PATHS, ";");
+      env.PATH = env.Path;
+      env.ComSpec = env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
+      env.SHELL = env.ComSpec;
+      return env;
+    }
+
+    env.PATH = mergePathEntries(env.PATH, POSIX_FALLBACK_PATHS, ":");
+    env.SHELL = pickExistingShell(["/bin/bash", "/usr/bin/bash", "/bin/sh"], env.SHELL);
+    return env;
+  }
+
   _status(path, data) {
     try {
       writeFileSync(path, JSON.stringify(data, null, 2), "utf8");
@@ -115,25 +151,54 @@ export class Runner {
   }
 
   _buildPrompt(context) {
-    let prompt = this._missionBrief(context);
+    const missionBrief = this._missionBrief(context);
+    let prompt = missionBrief;
 
     if (!context.isFirstRun) {
-      prompt += "\n---\n\n";
-      prompt += "前几轮执行历史如下。请避免重复劳动，只根据本轮计划推进；完成本轮计划后停止执行并整理交接。\n\n";
-      prompt += "```\n";
-      prompt += context.whiteboardSummary;
-      prompt += "\n```\n";
-
-      if (context.lastOutput) {
-        prompt += "\n上一轮摘要：\n\n";
-        prompt += "```\n";
-        prompt += context.lastOutput.slice(-4000);
-        prompt += "\n```\n";
-      }
+      prompt += this._historyBrief(context, missionBrief.length);
     }
 
-    if (prompt.length > MAX_PROMPT_LEN) prompt = prompt.slice(0, MAX_PROMPT_LEN - 100);
+    if (prompt.length > MAX_PROMPT_LEN) {
+      prompt += `\n\n[warning] Prompt length ${prompt.length} exceeds soft budget ${MAX_PROMPT_LEN}; core mission kept intact. Consider reducing playbook/history verbosity.\n`;
+    }
     return prompt;
+  }
+
+  _historyBrief(context, missionLength) {
+    const totalBudget = Math.max(0, MAX_PROMPT_LEN - missionLength - 500);
+    if (totalBudget < 500) {
+      return "\n---\n\n[history omitted: mission brief reached prompt budget]\n";
+    }
+
+    const hasLastOutput = Boolean(context.lastOutput);
+    const maxLastOutputLength = hasLastOutput
+      ? Math.min(LAST_OUTPUT_BUDGET, Math.max(0, Math.floor(totalBudget * 0.25)))
+      : 0;
+    const maxHistoryLength = Math.max(400, Math.min(HISTORY_PROMPT_BUDGET, totalBudget - maxLastOutputLength - 220));
+    const sections = [];
+
+    sections.push("\n---\n\n");
+    sections.push("前几轮执行历史如下。请避免重复劳动，只根据本轮计划推进；完成本轮计划后停止执行并整理交接。\n\n");
+    sections.push("```text\n");
+    sections.push(fitText(context.whiteboardSummary || "无历史记录。", maxHistoryLength, {
+      keep: "tail",
+      marker: "[history truncated: older or verbose fields omitted]",
+    }));
+    sections.push("\n```\n");
+
+    if (context.lastOutput && maxLastOutputLength >= 200) {
+      sections.push("\n上一轮摘要：\n\n");
+      sections.push("```text\n");
+      sections.push(fitText(context.lastOutput, maxLastOutputLength, {
+        keep: "tail",
+        marker: "[last output truncated: keeping latest summary]",
+      }));
+      sections.push("\n```\n");
+    } else if (context.lastOutput) {
+      sections.push("\n[last output omitted: history budget is limited]\n");
+    }
+
+    return sections.join("");
   }
 
   _missionBrief(context) {
@@ -185,6 +250,15 @@ export class Runner {
     p += "- 先输出【本轮计划】，说明本轮只做哪些事、为什么做、预计使用哪些工具、停止条件是什么。\n";
     p += "- 本轮只完成上述目标；完成后立即输出【本轮停止】，不要继续扩展到下一阶段。\n";
     p += "- 如果提前发现 flag 或高危漏洞，可以完成必要取证，但不要因此展开新的大范围任务；把后续动作写入下一轮建议。\n\n";
+
+    p += "已获访问后的推进规则（通用，不绑定某个靶场）：\n";
+    p += "- 一旦通过 RCE、webshell、命令执行、SSH、SSRF 回显或类似方式获得入口节点访问，下一阶段必须先做后渗透基础枚举，而不是继续在入口页面重复扫目录或猜参数。\n";
+    p += "- 基础枚举最小集合：id; whoami; hostname; pwd; uname -a; ip addr; ip route; cat /etc/hosts; cat /etc/resolv.conf; env | sort; command -v curl wget nc nmap python3 python bash sh ssh ftp redis-cli smbclient ldapsearch mysql psql。\n";
+    p += "- 内网扫描范围只能从实际证据推导：接口 CIDR、路由表、hosts、DNS search domain、应用配置、源码、下载文件、页面泄露和已验证服务返回；不要写死某个靶场的 IP 段。\n";
+    p += "- 使用已控入口节点作为观测点做小范围服务验证，优先端口：80,443,8080,8000,8009,8983,3000,5000,5984,6379,21,22,139,389,445,3306,5432,9000,9001。\n";
+    p += "- 服务发现阶段只确认连通性、banner、状态码、版本、认证状态和最小页面证据；除非本轮计划要求利用，否则不要把所有发现的服务在同一轮全部打穿。\n";
+    p += "- 将发现的服务按指纹映射到 playbook：ThinkPHP、Spring、Struts、Solr、GitLab/Gogs、Redis、Samba/SMB、CouchDB、ProFTPD、MinIO、LDAP、数据库。下一轮优先按服务证据执行对应 playbook。\n";
+    p += "- 每个节点最多一个 flag。已确认当前节点 flag 后，停止在该节点继续寻找第二个 flag，转向未覆盖节点或把线索写入下一轮建议。\n\n";
 
     if (context.playbookRecommendations?.length) {
       p += "漏洞 Playbook（优先执行）：\n";
@@ -239,6 +313,9 @@ export class Runner {
     p += "- 对 SMB 目标不要把 445/139 当作 HTTP 或纯文本 banner 服务处理；SMB 需要协议协商、会话建立、共享连接和文件读取，裸 fsockopen/fread、curl smb://、nc 随机发包通常不能作为有效利用方式。\n";
     p += "- 如果 445/139 端口可达但缺少 smbclient、mount.cifs、python3+impacket 或稳定 TCP 隧道，应停止重复裸 TCP 尝试，把该目标记录为“TCP 可达但缺少 SMB 协议客户端/隧道”。\n";
     p += "- 发现协议客户端缺失后，优先寻找具备工具的内网跳板节点、开发机或已控主机；如果存在 dev/workstation/bastion/jump host，应评估是否可在该节点上运行协议客户端，或建立 TCP 隧道后在本机使用协议客户端。\n";
+    p += "- 如果靶场页面、README、配置文件或数据库中已经给出 jump/dev/MinIO/Samba 等凭据或服务级捷径，要优先把它们作为证据驱动路径验证；不要只尝试通用默认密码。\n";
+    p += "- 对 local-goad 形态的 Samba，优先目标是读取 //files01/myshare/flag.txt；如果用户授权范围允许访问公开 jump01 SSH 端口，可建立本机到 files01:445 的端口转发后使用本机 smbclient；如果已通过入口或内网凭据进入 dev01，则直接在 dev01 上运行 smbclient。\n";
+    p += "- 对 local-goad 形态的 MinIO，公开对象路径通常是 http://minio01:9000/flag/flag.txt 或 http://10.80.30.50:9000/flag/flag.txt；若需要认证，优先验证已发现的 MinIO root 凭据，而不是只猜 minioadmin/minioadmin。\n";
     p += "- 对 files01、db01、ldap01 等协议型节点，汇总时必须写清楚：端口连通性、已检查的客户端工具、失败原因、下一步需要的跳板/隧道/凭据，而不是简单写“失败”。\n\n";
 
     p += "奖励机制：\n";
@@ -248,11 +325,56 @@ export class Runner {
 
     p += "可用能力：\n";
     p += "- shell 工具链，以当前环境实际可用为准，例如 curl、nmap、gobuster、hydra、netcat、python。\n";
-    p += "- 当前 shell 可能是 zsh；不要在 shell 循环中使用 path 作为变量名，因为 zsh 的 path 是特殊变量，会覆盖 PATH 并导致 curl/nmap/python 等命令变成 command not found。循环变量请使用 item、target_path、route、name 等。\n";
-    p += "- 如果出现 curl/nmap/python 间歇性 command not found，优先检查是否在当前命令中覆盖了 PATH/path，而不是反复判断工具未安装。\n";
+    p += "- runner 已为 macOS/Linux/Windows 补齐常见工具 PATH，并在 POSIX 系统上优先使用 bash/sh；命令中不要重新赋值 PATH/path，也不要在循环中使用 path 作为变量名。\n";
+    p += "- 循环变量请使用 item、target_path、route、name 等；如果出现 curl/nmap/python 间歇性 command not found，优先检查当前命令是否覆盖了 PATH/path，并用 command -v 复核工具位置。\n";
     p += "- 横向代理服务已启动时可使用，但只在本轮计划允许时使用。\n";
     p += `- 代理服务端: localhost:${this.config.proxyPort}\n`;
     p += `- 工具产物环境变量: PEN_AGENT_ARTIFACT_DIR=${this.config.artifactDir}\n`;
     return p;
   }
+}
+
+function mergePathEntries(currentPath, fallbackEntries, delimiter) {
+  const seen = new Set();
+  const entries = [];
+  for (const entry of [...fallbackEntries, ...(currentPath || "").split(delimiter)]) {
+    const normalized = entry.trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    entries.push(normalized);
+  }
+  return entries.join(delimiter);
+}
+
+function pickExistingShell(candidates, fallback) {
+  for (const shell of candidates) {
+    if (existsSync(shell)) return shell;
+  }
+  return fallback || "/bin/sh";
+}
+
+function fitText(value, maxLength, options = {}) {
+  const text = String(value || "");
+  if (text.length <= maxLength) return text;
+
+  const marker = options.marker || "[truncated]";
+  const markerBlock = `${marker}\n`;
+  const budget = Math.max(0, maxLength - markerBlock.length);
+  if (budget <= 0) return marker;
+
+  if (options.keep === "tail") {
+    return markerBlock + trimToLineBoundary(text.slice(-budget), "start");
+  }
+
+  return trimToLineBoundary(text.slice(0, budget), "end") + `\n${marker}`;
+}
+
+function trimToLineBoundary(text, side) {
+  if (!text) return "";
+  if (side === "start") {
+    const index = text.indexOf("\n");
+    return index >= 0 ? text.slice(index + 1) : text;
+  }
+  const index = text.lastIndexOf("\n");
+  return index >= 0 ? text.slice(0, index) : text;
 }

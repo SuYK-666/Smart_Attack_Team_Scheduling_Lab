@@ -19,6 +19,8 @@ export const useRuntimeStore = defineStore("runtime", {
     assets: [] as AssetNode[],
     edges: [] as AssetEdge[],
     run: { running: false, active: null, recent: [] } as RunControlState,
+    history: [] as RunControlState["recent"],
+    selectedRunId: "",
     notes: [] as NoteFile[],
     activeNote: null as NoteContent | null,
     teams: { teams: [] } as TeamStatusState,
@@ -31,11 +33,20 @@ export const useRuntimeStore = defineStore("runtime", {
     iterations: (state) => state.state.iterations || [],
     latestIteration: (state) => (state.state.iterations || []).at(-1),
     effectivePhase: (state) => {
+      if (state.selectedRunId) return state.status.phase || "archived";
       if (state.run.running) return "running";
       if (state.status.phase === "running") return "idle";
       return state.status.phase || "idle";
     },
+    currentIteration: (state) => {
+      if (state.selectedRunId) return state.state.iteration || state.status.iter || 0;
+      if (state.run.running || state.status.phase === "running") {
+        return state.status.iter || state.state.iteration || 0;
+      }
+      return state.state.iteration || state.status.iter || 0;
+    },
     target: (state) => String(state.state._config?.target || state.flags.target || "?"),
+    viewingHistory: (state) => Boolean(state.selectedRunId),
     flagsFound: (state) => state.flags.count || state.state._flagsFound || 0,
     flagsNeeded: (state) => state.state._flagsNeeded || 0,
     serviceCount: (state) => (state.state.iterations || []).reduce((sum, item) => sum + (item.services?.length || 0), 0),
@@ -45,16 +56,19 @@ export const useRuntimeStore = defineStore("runtime", {
   },
   actions: {
     async refreshAll() {
+      const suffix = this.selectedRunId ? `?runId=${encodeURIComponent(this.selectedRunId)}` : "";
+      const logSuffix = this.selectedRunId ? `?lines=120&runId=${encodeURIComponent(this.selectedRunId)}` : "?lines=120";
       const [status, whiteboard, flags, graph, notes, teams, logs] = await Promise.all([
-        getJson<RuntimeStatus>("/api/status", { phase: "idle" }),
-        getJson<WhiteboardState>("/api/state", { iterations: [] }),
-        getJson<FlagState>("/api/flags", { count: 0, flags: [] }),
-        getJson<{ nodes: AssetNode[]; edges: AssetEdge[] }>("/api/asset-graph", { nodes: [], edges: [] }),
-        getJson<NoteFile[]>("/api/notes", []),
-        getJson<TeamStatusState>("/api/teams", { teams: [] }),
-        getJson<{ lines: string[] }>("/api/logs/tail?lines=120", { lines: [] }),
+        getJson<RuntimeStatus>(`/api/status${suffix}`, { phase: "idle" }),
+        getJson<WhiteboardState>(`/api/state${suffix}`, { iterations: [] }),
+        getJson<FlagState>(`/api/flags${suffix}`, { count: 0, flags: [] }),
+        getJson<{ nodes: AssetNode[]; edges: AssetEdge[] }>(`/api/asset-graph${suffix}`, { nodes: [], edges: [] }),
+        getJson<NoteFile[]>(`/api/notes${suffix}`, []),
+        getJson<TeamStatusState>(`/api/teams${suffix}`, { teams: [] }),
+        getJson<{ lines: string[] }>(`/api/logs/tail${logSuffix}`, { lines: [] }),
       ]);
       const run = await getJson<RunControlState>("/api/run", { running: false, active: null, recent: [] });
+      const history = await getJson<RunControlState["recent"]>("/api/history", []);
       this.status = status;
       this.state = whiteboard;
       this.flags = flags;
@@ -63,12 +77,14 @@ export const useRuntimeStore = defineStore("runtime", {
       this.notes = notes;
       this.teams = teams;
       this.run = run;
+      this.history = history || [];
       this.logLines = logs.lines;
       this.lastRefresh = new Date().toLocaleTimeString();
       if (!this.activeNote && notes.length) await this.loadNote(notes[notes.length - 1].name);
     },
     async loadNote(name: string) {
-      this.activeNote = await getJson<NoteContent>(`/api/notes/read?name=${encodeURIComponent(name)}`, { name, content: "", updatedAt: "" });
+      const runParam = this.selectedRunId ? `&runId=${encodeURIComponent(this.selectedRunId)}` : "";
+      this.activeNote = await getJson<NoteContent>(`/api/notes/read?name=${encodeURIComponent(name)}${runParam}`, { name, content: "", updatedAt: "" });
     },
     async startRun(payload: Record<string, unknown>) {
       this.actionError = "";
@@ -83,6 +99,8 @@ export const useRuntimeStore = defineStore("runtime", {
         this.actionError = data.error || "启动失败";
         return false;
       }
+      this.selectedRunId = "";
+      this.activeNote = null;
       this.run = { running: true, active: data.run, recent: this.run.recent || [] };
       this.actionMessage = "任务已启动";
       await this.refreshAll();
@@ -101,14 +119,27 @@ export const useRuntimeStore = defineStore("runtime", {
       await this.refreshAll();
       return true;
     },
+    async selectRun(runId: string) {
+      this.selectedRunId = runId || "";
+      this.activeNote = null;
+      await this.refreshAll();
+    },
+    async showCurrentRun() {
+      await this.selectRun("");
+    },
     connectEvents() {
       const events = new EventSource("/api/events");
       events.addEventListener("update", (event) => {
         const data = JSON.parse((event as MessageEvent).data);
+        this.run = data.run || this.run;
+        this.history = data.history || this.history;
+        if (this.selectedRunId) {
+          this.lastRefresh = new Date().toLocaleTimeString();
+          return;
+        }
         this.status = data.status;
         this.state = data.state;
         this.flags = data.flags;
-        this.run = data.run || this.run;
         this.teams = data.teams || this.teams;
         this.assets = data.graph?.nodes || [];
         this.edges = data.graph?.edges || [];

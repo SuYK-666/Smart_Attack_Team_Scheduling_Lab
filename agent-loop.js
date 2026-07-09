@@ -48,18 +48,25 @@ export async function startAgent(config) {
       flagsFound: flagCounter.count(),
       staleLoops,
       lastSummary: prevSummary,
+      iterations: whiteboard.iterations,
+    });
+    const promptWhiteboardSummary = whiteboard.summary({
+      maxIterations: 3,
+      maxFieldLength: 320,
+      maxListItems: 8,
     });
     const skillRecommendations = recommendSkills({
       loopPlan,
       iterations: whiteboard.iterations,
-      whiteboardSummary: whiteboard.summary(),
+      whiteboardSummary: promptWhiteboardSummary,
       lastOutput: prevSummary,
     });
     const playbookRecommendations = recommendPlaybooks({
       loopPlan,
       iterations: whiteboard.iterations,
-      whiteboardSummary: whiteboard.summary(),
+      whiteboardSummary: promptWhiteboardSummary,
       lastOutput: prevSummary,
+      foundFlags: flagCounter.all(),
     });
 
     const flagTarget = config.maxFlags ? `${config.flagsNeeded}-${config.maxFlags}` : `${config.flagsNeeded}+`;
@@ -81,7 +88,7 @@ export async function startAgent(config) {
       flagsNeeded: config.flagsNeeded,
       maxFlags: config.maxFlags,
       foundFlags: flagCounter.all(),
-      whiteboardSummary: whiteboard.summary(),
+      whiteboardSummary: promptWhiteboardSummary,
       lastOutput: prevSummary,
     };
 
@@ -175,6 +182,31 @@ export async function startAgent(config) {
 }
 
 function buildLoopPlan(loopIndex, state) {
+  const foothold = detectFootholdState(state.iterations || []);
+  if (foothold.hasFoothold && !foothold.hasInternalCoverage) {
+    return {
+      title: `第 ${loopIndex} 轮：已获入口访问后的内网枚举与服务发现`,
+      goals: [
+        "基于已获得的 shell/RCE/webshell 只做后渗透基础枚举：id、whoami、hostname、pwd、ip addr、ip route、/etc/hosts、/etc/resolv.conf、可用工具清单。",
+        "从实际接口、路由、DNS、hosts、配置文件中推导内网 CIDR 和主机名；不要写死某个靶场网段，也不要扫描未授权公网端口。",
+        "使用已控入口节点作为观测点，小范围验证高价值内网端口和服务指纹，优先 HTTP、SSH、FTP、SMB、Redis、LDAP、数据库、Solr、GitLab、CouchDB、MinIO。",
+        "本轮只形成内网资产/服务清单、可疑漏洞映射和下一轮 playbook 优先级；除非已经有直接 flag 证据，否则不要展开大规模利用。",
+      ],
+    };
+  }
+
+  if (foothold.hasFoothold && foothold.hasInternalCoverage && !foothold.hasPostFootholdAttack) {
+    return {
+      title: `第 ${loopIndex} 轮：基于内网服务指纹的漏洞验证`,
+      goals: [
+        "根据上一轮确认的内网服务指纹选择 2-4 个最高价值目标验证，不要重复入口节点枚举。",
+        "优先按命中的 playbook 验证 Solr、GitLab/Gogs、Redis、Samba/SMB、CouchDB、ProFTPD、MinIO、Struts 等服务。",
+        "每个目标先确认服务、版本、认证状态和可访问路径，再做最小必要利用或 flag 读取。",
+        "已拿到 flag 的节点不再搜索第二个 flag；把未覆盖节点和阻塞原因写入下一轮建议。",
+      ],
+    };
+  }
+
   const plans = [
     {
       title: "第 1 轮：信息收集与攻击面建模",
@@ -228,6 +260,67 @@ function buildLoopPlan(loopIndex, state) {
       "输出新增证据、失败原因、下一轮建议和奖励判断。",
     ],
   };
+}
+
+function detectFootholdState(iterations = []) {
+  const text = iterations.map((iter) => [
+    iter.summary,
+    iter.position,
+    ...(iter.flags || []),
+    ...(iter.newAccess || []),
+    ...(iter.intel || []),
+    ...(iter.nextSteps || []),
+    ...(iter.actions || []),
+    ...(iter.toolCalls || []).flatMap((call) => [call.command, call.purpose, call.result, call.impact]),
+  ].flat().filter(Boolean).join("\n")).join("\n");
+
+  const hasFoothold = /webshell|shell\.jsp|反弹\s*shell|命令执行|RCE|whoami|uid=\d+|gid=\d+|hostname|\/flag\.txt|已获得.*(?:shell|访问|权限)|获得.*flag/i.test(text);
+  const hasRouteEvidence = /ip route|route -n|ip addr|ifconfig|\/etc\/hosts|\/etc\/resolv\.conf|内网|private pivot|pivot|横向|10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[0-1])\.\d+\.\d+|192\.168\.\d+\.\d+/i.test(text);
+  const serviceHits = countInternalServiceHits(iterations);
+  const hasInternalCoverage = hasRouteEvidence && serviceHits >= 2;
+  const hasPostFootholdAttack = /(solr|gitlab|gogs|redis|samba|smbclient|couchdb|proftpd|ftp|minio|struts|ldap|mysql|postgres|mongodb).*(flag|漏洞|利用|RCE|读取|认证|登录)|Playbook 使用[\s\S]{0,120}(solr|gitlab|gogs|redis|samba|couchdb|proftpd|minio|struts)/i.test(text);
+
+  return { hasFoothold, hasInternalCoverage, hasPostFootholdAttack };
+}
+
+function countInternalServiceHits(iterations = []) {
+  const keys = new Set();
+  const servicePatterns = [
+    /solr|8983/i,
+    /gitlab|gogs|3000|8022/i,
+    /redis|6379/i,
+    /samba|smb|445|139/i,
+    /couchdb|5984/i,
+    /proftpd|ftp|21/i,
+    /minio|9000|9001/i,
+    /struts|8080/i,
+    /ldap|389/i,
+    /mysql|mariadb|3306/i,
+  ];
+
+  for (const iter of iterations) {
+    for (const service of iter.services || []) {
+      const text = `${service.host || ""}:${service.port || ""} ${service.name || ""}`;
+      if (!isPrivateTargetText(text)) continue;
+      for (const pattern of servicePatterns) {
+        if (pattern.test(text)) keys.add(pattern.toString());
+      }
+    }
+    const text = [
+      ...(iter.intel || []),
+      ...(iter.nextSteps || []),
+      ...(iter.toolCalls || []).flatMap((call) => [call.command, call.result]),
+    ].filter(Boolean).join("\n");
+    for (const pattern of servicePatterns) {
+      if (pattern.test(text) && isPrivateTargetText(text)) keys.add(pattern.toString());
+    }
+  }
+
+  return keys.size;
+}
+
+function isPrivateTargetText(text) {
+  return /10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[0-1])\.\d+\.\d+|192\.168\.\d+\.\d+|\.local|\.lan|\.internal|\.corp/i.test(String(text || ""));
 }
 
 function hasMeaningfulFindings(findings) {

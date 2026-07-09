@@ -107,46 +107,52 @@ export class Whiteboard {
     return creds;
   }
 
-  summary() {
+  summary(options = {}) {
+    const maxIterations = options.maxIterations || this.iterations.length;
+    const maxFieldLength = options.maxFieldLength || Infinity;
+    const maxListItems = options.maxListItems || Infinity;
     const lines = [];
     lines.push(`Target: ${this.state._config?.target || "?"}`);
     lines.push(`Flags: ${this.state._flagsFound || 0}/${this.state._flagsNeeded || "?"}`);
 
-    for (const iter of this.iterations) {
+    const start = Math.max(0, this.iterations.length - maxIterations);
+    if (start > 0) lines.push(`History: showing latest ${maxIterations}/${this.iterations.length} iterations.`);
+
+    for (const iter of this.iterations.slice(start)) {
       lines.push(`\n── iter ${iter.iter} ──`);
-      if (iter.summary) lines.push(`  Summary: ${iter.summary}`);
+      if (iter.summary) lines.push(`  Summary: ${clipField(iter.summary, maxFieldLength)}`);
       if (iter.position && iter.position !== "unknown") {
-        lines.push(`  Position: ${iter.position}`);
+        lines.push(`  Position: ${clipField(iter.position, maxFieldLength)}`);
       }
-      if (iter.flags.length) lines.push(`  Flags: ${iter.flags.join(", ")}`);
-      if (iter.hosts.length) lines.push(`  Hosts: ${iter.hosts.join(", ")}`);
+      if (iter.flags.length) lines.push(`  Flags: ${clipList(iter.flags, maxListItems, maxFieldLength).join(", ")}`);
+      if (iter.hosts.length) lines.push(`  Hosts: ${clipList(iter.hosts, maxListItems, maxFieldLength).join(", ")}`);
       if (iter.services.length) {
-        lines.push(`  Services: ${iter.services.map((s) => `${s.host}:${s.port}`).join(", ")}`);
+        lines.push(`  Services: ${clipList(iter.services.map((s) => `${s.host}:${s.port}`), maxListItems, maxFieldLength).join(", ")}`);
       }
       if (iter.credentials.length) {
-        lines.push(`  Credentials: ${iter.credentials.map((c) => `${c.username || "?"}:${c.password || "?"}@${c.host || "?"}`).join(", ")}`);
+        lines.push(`  Credentials: ${clipList(iter.credentials.map((c) => `${c.username || "?"}:${c.password || "?"}@${c.host || "?"}`), maxListItems, maxFieldLength).join(", ")}`);
       }
       if (iter.skillsUsed?.length) {
-        lines.push(`  Skills: ${iter.skillsUsed.map((s) => `${s.name || "?"}: ${s.result || s.reason || ""}`).join("; ")}`);
+        lines.push(`  Skills: ${clipList(iter.skillsUsed.map((s) => `${s.name || "?"}: ${s.result || s.reason || ""}`), maxListItems, maxFieldLength).join("; ")}`);
       }
       if (iter.playbooksUsed?.length) {
-        lines.push(`  Playbooks: ${iter.playbooksUsed.map((p) => `${p.id || "?"}: ${p.result || p.step || ""}`).join("; ")}`);
+        lines.push(`  Playbooks: ${clipList(iter.playbooksUsed.map((p) => `${p.id || "?"}: ${p.result || p.step || ""}`), maxListItems, maxFieldLength).join("; ")}`);
       }
-      if (iter.access.length) lines.push(`  Access: ${iter.access.join("; ")}`);
-      if (iter.intel.length) lines.push(`  Intel: ${iter.intel.join("; ")}`);
+      if (iter.access.length) lines.push(`  Access: ${clipList(iter.access, maxListItems, maxFieldLength).join("; ")}`);
+      if (iter.intel.length) lines.push(`  Intel: ${clipList(iter.intel, maxListItems, maxFieldLength).join("; ")}`);
       if (iter.toolCalls?.length) {
-        lines.push(`  Tools: ${iter.toolCalls.map((t) => `${t.tool || "tool"}: ${t.command || ""} => ${t.result || ""}`).join("; ")}`);
+        lines.push(`  Tools: ${clipList(iter.toolCalls.map((t) => `${t.tool || "tool"}: ${t.command || ""} => ${t.result || ""}`), maxListItems, maxFieldLength).join("; ")}`);
       }
       if (iter.analysisTrail?.length) {
-        lines.push(`  Analysis: ${iter.analysisTrail.map((a) => `[${a.phase || "?"}] ${a.action || ""} -> ${a.evidence || ""}`).join("; ")}`);
+        lines.push(`  Analysis: ${clipList(iter.analysisTrail.map((a) => `[${a.phase || "?"}] ${a.action || ""} -> ${a.evidence || ""}`), maxListItems, maxFieldLength).join("; ")}`);
       }
       if (iter.problems?.length) {
-        lines.push(`  Problems: ${iter.problems.map((p) => `${p.symptom || "?"}: ${p.resolution || ""}`).join("; ")}`);
+        lines.push(`  Problems: ${clipList(iter.problems.map((p) => `${p.symptom || "?"}: ${p.resolution || ""}`), maxListItems, maxFieldLength).join("; ")}`);
       }
       if (iter.rewardEvaluation) {
-        lines.push(`  Reward: ${iter.rewardEvaluation.level || "?"}: ${iter.rewardEvaluation.reason || ""}`);
+        lines.push(`  Reward: ${clipField(`${iter.rewardEvaluation.level || "?"}: ${iter.rewardEvaluation.reason || ""}`, maxFieldLength)}`);
       }
-      if (iter.nextSteps?.length) lines.push(`  Next: ${iter.nextSteps.join("; ")}`);
+      if (iter.nextSteps?.length) lines.push(`  Next: ${clipList(iter.nextSteps, maxListItems, maxFieldLength).join("; ")}`);
     }
     return lines.join("\n");
   }
@@ -170,4 +176,17 @@ export class Whiteboard {
   getFlagsNeeded() {
     return this.state._flagsNeeded || 0;
   }
+}
+
+function clipField(value, maxLength) {
+  const text = String(value || "");
+  if (!Number.isFinite(maxLength) || text.length <= maxLength) return text;
+  if (maxLength <= 20) return text.slice(0, maxLength);
+  return `${text.slice(0, maxLength - 15)}... [truncated]`;
+}
+
+function clipList(values, maxItems, maxFieldLength) {
+  const list = values.map((value) => clipField(value, maxFieldLength));
+  if (!Number.isFinite(maxItems) || list.length <= maxItems) return list;
+  return [...list.slice(0, maxItems), `... ${list.length - maxItems} more`];
 }
