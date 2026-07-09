@@ -1,0 +1,21 @@
+$ORIGIN sentinel.local.
+$TTL 3600
+@        IN SOA dns01.sentinel.local. admin.sentinel.local. 2026070801 7200 3600 1209600 3600
+         IN NS  dns01.sentinel.local.
+
+entry01  IN A   10.92.10.10
+jump01   IN A   10.92.10.20
+intranet IN A   10.92.20.10
+wiki01   IN A   10.92.20.11
+git01    IN A   10.92.20.20
+mail01   IN A   10.92.20.30
+dev01    IN A   10.92.20.50
+ldap01   IN A   10.92.30.10
+db01     IN A   10.92.30.20
+cache01  IN A   10.92.30.30
+files01  IN A   10.92.30.40
+minio01  IN A   10.92.30.50
+dns01    IN A   10.92.30.53
+
+backup   IN CNAME minio01.sentinel.local.
+code     IN CNAME git01.sentinel.local.

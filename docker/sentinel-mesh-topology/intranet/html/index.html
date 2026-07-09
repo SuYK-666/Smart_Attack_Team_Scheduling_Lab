@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sentinel Mesh Intranet</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 40px; color: #1f2933; background: #f7f9fb; }
+    main { max-width: 920px; background: #fff; padding: 28px 32px; border: 1px solid #d8dee6; }
+    code { background: #eef1f4; padding: 2px 6px; border-radius: 4px; }
+    li { margin: 9px 0; }
+    small { color: #617080; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Sentinel Mesh Intranet</h1>
+    <p>Internal operations portal for the segmented CTF range.</p>
+    <ul>
+      <li>Wiki search: <code>wiki01.sentinel.local:8983</code></li>
+      <li>Code platform: <code>git01.sentinel.local:80</code></li>
+      <li>Mailbox UI: <code>mail01.sentinel.local:8025</code></li>
+      <li>Directory: <code>ldap01.sentinel.local:389</code></li>
+      <li>Operations DB: <code>db01.sentinel.local:3306</code></li>
+      <li>Cache API: <code>cache01.sentinel.local:5984</code></li>
+      <li>File staging: <code>files01.sentinel.local:21</code></li>
+      <li>Object storage: <code>minio01.sentinel.local:9000</code></li>
+    </ul>
+    <p><small>Reminder: bastion account is <code>jumpop</code>. Storage credentials are tracked through the operations database runbook, not this page.</small></p>
+    <!-- Internal DNS aliases: code.sentinel.local, backup.sentinel.local -->
+  </main>
+</body>
+</html>
