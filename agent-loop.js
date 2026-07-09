@@ -8,6 +8,8 @@ import { StreamFlagScanner } from "./stream-flag-scanner.js";
 import { ProxyServer } from "./proxy/proxy-server.js";
 import { Whiteboard } from "./whiteboard.js";
 import { supervise } from "./supervisor.js";
+import { recommendSkills } from "./skill-router.js";
+import { recommendPlaybooks } from "./vulnerability-playbooks.js";
 
 export async function startAgent(config) {
   const whiteboard = new Whiteboard(config.workDir);
@@ -47,16 +49,34 @@ export async function startAgent(config) {
       staleLoops,
       lastSummary: prevSummary,
     });
+    const skillRecommendations = recommendSkills({
+      loopPlan,
+      iterations: whiteboard.iterations,
+      whiteboardSummary: whiteboard.summary(),
+      lastOutput: prevSummary,
+    });
+    const playbookRecommendations = recommendPlaybooks({
+      loopPlan,
+      iterations: whiteboard.iterations,
+      whiteboardSummary: whiteboard.summary(),
+      lastOutput: prevSummary,
+    });
 
     const flagTarget = config.maxFlags ? `${config.flagsNeeded}-${config.maxFlags}` : `${config.flagsNeeded}+`;
     console.log(chalk.yellow(`\n=== loop ${loopIndex}/${config.maxLoops} | flags: ${flagCounter.count()}/${flagTarget} | stale: ${staleLoops}/${config.stopAfterStale} ===`));
     console.log(chalk.yellow(`[loop plan] ${loopPlan.title}`));
     for (const item of loopPlan.goals) console.log(chalk.yellow(`  - ${item}`));
+    console.log(chalk.yellow(`[skill hints] ${skillRecommendations.map((item) => item.name).join(", ")}`));
+    if (playbookRecommendations.length) {
+      console.log(chalk.yellow(`[playbooks] ${playbookRecommendations.map((item) => item.id).join(", ")}`));
+    }
 
     const context = {
       isFirstRun: loopIndex === 1,
       loopIndex,
       loopPlan,
+      skillRecommendations,
+      playbookRecommendations,
       flagsFound: flagCounter.count(),
       flagsNeeded: config.flagsNeeded,
       maxFlags: config.maxFlags,

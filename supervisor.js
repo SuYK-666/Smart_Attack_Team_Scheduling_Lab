@@ -28,6 +28,8 @@ Schema:
   "newHosts": ["new IPs or hostnames"],
   "newServices": [{"host":"ip","port":80,"name":"http"}],
   "newCredentials": [{"username":"","password":"","host":"","service":""}],
+  "skillsUsed": [{"name":"skill name","reason":"why it was selected","result":"verification result or why skipped"}],
+  "playbooksUsed": [{"id":"playbook id","evidence":"why it matched","step":"last executed step","result":"success/failure/blocker"}],
   "keyActions": ["Chinese key actions"],
   "toolCalls": [{"tool":"curl/nmap/gobuster/bash/python/netcat/skill/etc","command":"full command or HTTP request","purpose":"why it was run","result":"status/output/discovery/failure summary","impact":"how it affected next step"}],
   "analysisTrail": [{"phase":"信息收集|扫描判断|攻击尝试|权限扩展|横向移动|回传取证|失败排查|验证收尾","hypothesis":"evidence-based reasoning summary in Chinese","action":"specific action","evidence":"observable evidence","decision":"next decision or why abandoned"}],
@@ -41,6 +43,8 @@ Schema:
 
 Rules:
 - Extract visible commands, HTTP requests, tool names, parameters, outputs, errors, and how they influenced the next step.
+- Extract visible skill usage from sections like 【Skill 使用】, including selected skill names, reasons, checks, results, and skipped recommendations.
+- Extract visible playbook usage from sections like 【Playbook 使用】, including playbook id, matching evidence, last executed step, result, and blockers.
 - Do not invent hidden chain-of-thought. Use observable evidence and concise decision summaries.
 - Include failed attempts when visible.
 - Filter noise, but preserve important command evidence, URLs, credentials, upload paths, sessions, callbacks, and flags.`;
@@ -115,6 +119,8 @@ function mergeWithFallback(parsed, fallback) {
     newHosts: mergeUnique(parsed.newHosts, fallback.newHosts),
     newServices: parsed.newServices?.length ? parsed.newServices : fallback.newServices,
     newCredentials: parsed.newCredentials?.length ? parsed.newCredentials : fallback.newCredentials,
+    skillsUsed: parsed.skillsUsed?.length ? parsed.skillsUsed : fallback.skillsUsed,
+    playbooksUsed: parsed.playbooksUsed?.length ? parsed.playbooksUsed : fallback.playbooksUsed,
     keyActions: parsed.keyActions?.length ? parsed.keyActions : fallback.keyActions,
     toolCalls: parsed.toolCalls?.length ? parsed.toolCalls : fallback.toolCalls,
     analysisTrail: parsed.analysisTrail?.length ? parsed.analysisTrail : fallback.analysisTrail,
@@ -273,6 +279,8 @@ function basicExtract(output) {
   }
 
   const toolCalls = extractToolCalls(output);
+  const skillsUsed = extractSkillsUsed(output);
+  const playbooksUsed = extractPlaybooksUsed(output);
   const keyActions = toolCalls.slice(0, 12).map((c) => `${c.tool}: ${c.purpose || c.command}`);
   const problems = extractProblems(output);
 
@@ -282,6 +290,8 @@ function basicExtract(output) {
     newHosts: hosts,
     newServices: [],
     newCredentials: dedupeCreds(creds),
+    skillsUsed,
+    playbooksUsed,
     keyActions,
     toolCalls,
     analysisTrail: toolCalls.slice(0, 12).map((c) => ({
@@ -300,6 +310,81 @@ function basicExtract(output) {
     newAccess: [],
     intel: extractIntel(output),
   };
+}
+
+function extractPlaybooksUsed(output) {
+  const playbooks = [];
+  const idPattern = /((?:thinkphp|spring4shell|struts2|solr|gitlab|gogs|redis|samba|couchdb|proftpd|minio)[a-z0-9-]*)/gi;
+  const lines = output.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!/Playbook 使用|playbook 使用|使用 playbook|playbook:/i.test(line)) continue;
+    const block = [line, ...lines.slice(i + 1, i + 10)].join("\n");
+    for (const match of block.matchAll(idPattern)) {
+      const id = match[1].toLowerCase();
+      playbooks.push({
+        id,
+        evidence: summarizeSkillField(block, /(?:证据|evidence|命中)[:：]\s*([^\n]+)/i) || "日志中提到该 playbook 与目标证据匹配",
+        step: summarizeSkillField(block, /(?:步骤|step)[:：]\s*([^\n]+)/i) || "",
+        result: summarizeSkillField(block, /(?:结果|result|阻塞|blocker)[:：]\s*([^\n]+)/i) || block.replace(/\s+/g, " ").slice(0, 240),
+      });
+    }
+  }
+  return dedupePlaybooks(playbooks);
+}
+
+function dedupePlaybooks(playbooks) {
+  const seen = new Set();
+  const result = [];
+  for (const playbook of playbooks) {
+    const key = `${playbook.id}:${playbook.evidence}:${playbook.step}:${playbook.result}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(playbook);
+  }
+  return result.slice(0, 12);
+}
+
+function extractSkillsUsed(output) {
+  const skills = [];
+  const knownSkill = /([a-z0-9]+(?:-[a-z0-9]+){1,8})/g;
+  const lines = output.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!/Skill 使用|skill 使用|使用 skill|推荐 skill|skill:/i.test(line)) continue;
+    const block = [line, ...lines.slice(i + 1, i + 8)].join("\n");
+    for (const match of block.matchAll(knownSkill)) {
+      const name = match[1].toLowerCase();
+      if (!isLikelySkillName(name)) continue;
+      skills.push({
+        name,
+        reason: summarizeSkillField(block, /(?:原因|reason)[:：]\s*([^\n]+)/i) || "日志中提到该 skill 与本轮目标相关",
+        result: summarizeSkillField(block, /(?:结果|result|验证结果)[:：]\s*([^\n]+)/i) || block.replace(/\s+/g, " ").slice(0, 220),
+      });
+    }
+  }
+  return dedupeSkills(skills);
+}
+
+function isLikelySkillName(name) {
+  return /(?:sqli|xss|cmdi|path-traversal|lfi|recon|methodology|tunneling|pivoting|privilege|reverse-shell|unauthorized|api|auth|jwt|ssrf|ssti|deserialization|redis|kubernetes|active-directory)/i.test(name);
+}
+
+function summarizeSkillField(block, pattern) {
+  const match = block.match(pattern);
+  return match ? match[1].trim().slice(0, 200) : "";
+}
+
+function dedupeSkills(skills) {
+  const seen = new Set();
+  const result = [];
+  for (const skill of skills) {
+    const key = `${skill.name}:${skill.reason}:${skill.result}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(skill);
+  }
+  return result.slice(0, 12);
 }
 
 function sanitizeFlags(values = []) {
@@ -508,6 +593,8 @@ function emptyFindings(summary) {
     newHosts: [],
     newServices: [],
     newCredentials: [],
+    skillsUsed: [],
+    playbooksUsed: [],
     keyActions: [],
     toolCalls: [],
     analysisTrail: [],

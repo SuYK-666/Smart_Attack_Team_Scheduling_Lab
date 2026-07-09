@@ -980,6 +980,7 @@ code {
   .overview-grid { grid-template-columns: 1fr 1fr; }
   .overview-grid > .metric,
   .overview-pair { grid-column: span 1; }
+  .overview-full { grid-column: 1 / -1; }
   .start-layout { grid-template-columns: 1fr; }
   .wide { grid-column: span 2; }
 }
@@ -989,6 +990,7 @@ code {
   .overview-grid { grid-template-columns: 1fr; }
   .overview-grid > .metric,
   .overview-pair { grid-column: span 1; }
+  .overview-full { grid-column: 1 / -1; }
   .shared-board,
   .team-io { grid-template-columns: 1fr; }
   .launch-form { grid-template-columns: 1fr; }

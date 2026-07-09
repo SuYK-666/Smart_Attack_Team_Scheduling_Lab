@@ -45,6 +45,8 @@ export class Whiteboard {
       hosts: findings.newHosts || [],
       services: findings.newServices || [],
       credentials: findings.newCredentials || [],
+      skillsUsed: findings.skillsUsed || [],
+      playbooksUsed: findings.playbooksUsed || [],
       actions: findings.keyActions || [],
       toolCalls: findings.toolCalls || [],
       analysisTrail: findings.analysisTrail || [],
@@ -123,6 +125,12 @@ export class Whiteboard {
       }
       if (iter.credentials.length) {
         lines.push(`  Credentials: ${iter.credentials.map((c) => `${c.username || "?"}:${c.password || "?"}@${c.host || "?"}`).join(", ")}`);
+      }
+      if (iter.skillsUsed?.length) {
+        lines.push(`  Skills: ${iter.skillsUsed.map((s) => `${s.name || "?"}: ${s.result || s.reason || ""}`).join("; ")}`);
+      }
+      if (iter.playbooksUsed?.length) {
+        lines.push(`  Playbooks: ${iter.playbooksUsed.map((p) => `${p.id || "?"}: ${p.result || p.step || ""}`).join("; ")}`);
       }
       if (iter.access.length) lines.push(`  Access: ${iter.access.join("; ")}`);
       if (iter.intel.length) lines.push(`  Intel: ${iter.intel.join("; ")}`);

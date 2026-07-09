@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { createReadStream, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { createReadStream, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -330,9 +330,11 @@ function walk(dir, depth = 0) {
 }
 
 function enrichFlags() {
-  const flags = readJson(join(artifactDir, "flags.json"), { count: 0, flags: [], updatedAt: null });
+  const rawFlags = readJson(join(artifactDir, "flags.json"), { count: 0, flags: [], updatedAt: null });
   const state = readState();
   const logLines = tailFile(join(penDir, "stream.log"), 500);
+  const flags = normalizeFlagState(rawFlags, state);
+  syncFlagFiles(flags);
   return {
     ...flags,
     flags: (flags.flags || []).map((flag) => ({
@@ -340,6 +342,50 @@ function enrichFlags() {
       evidence: findFlagEvidence(flag.value, state, logLines),
     })),
   };
+}
+
+function normalizeFlagState(rawFlags, state) {
+  const values = [];
+  for (const item of rawFlags.flags || []) {
+    if (typeof item === "string") values.push(item);
+    else if (item?.value) values.push(item.value);
+    else if (item?.flag) values.push(item.flag);
+  }
+
+  try {
+    const text = readFileSync(join(artifactDir, "flags.txt"), "utf-8");
+    values.push(...text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+  } catch {}
+
+  for (const iter of state.iterations || []) {
+    values.push(...(iter.flags || []));
+  }
+
+  const unique = [...new Set(values.filter(Boolean))];
+  const config = state._config || {};
+  return {
+    target: rawFlags.target || config.target || "unknown-target",
+    targetHost: rawFlags.targetHost,
+    targetPort: rawFlags.targetPort,
+    flagsNeeded: rawFlags.flagsNeeded || state._flagsNeeded || 0,
+    maxFlags: rawFlags.maxFlags ?? config.maxFlags ?? null,
+    count: unique.length,
+    updatedAt: rawFlags.updatedAt || new Date().toISOString(),
+    loopsUsed: rawFlags.loopsUsed ?? null,
+    flags: unique.map((value, index) => ({
+      index: index + 1,
+      value,
+    })),
+  };
+}
+
+function syncFlagFiles(flags) {
+  try {
+    writeFileSync(join(artifactDir, "flags.json"), JSON.stringify(flags, null, 2));
+    writeFileSync(join(artifactDir, "flags.txt"), flags.flags.length ? `${flags.flags.map((item) => item.value).join("\n")}\n` : "");
+  } catch (e) {
+    console.error(`[dashboard] failed to sync flag files: ${e.message}`);
+  }
 }
 
 function findFlagEvidence(flag, state, logLines) {

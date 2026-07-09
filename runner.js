@@ -186,6 +186,31 @@ export class Runner {
     p += "- 本轮只完成上述目标；完成后立即输出【本轮停止】，不要继续扩展到下一阶段。\n";
     p += "- 如果提前发现 flag 或高危漏洞，可以完成必要取证，但不要因此展开新的大范围任务；把后续动作写入下一轮建议。\n\n";
 
+    if (context.playbookRecommendations?.length) {
+      p += "漏洞 Playbook（优先执行）：\n";
+      p += "- 本轮应优先按命中的 playbook 推进；playbook 是具体步骤模板，不是越权许可，只有当目标服务、版本、端口或页面证据匹配时才执行。\n";
+      p += "- 使用 playbook 时必须输出【Playbook 使用】，写明 playbook id、命中证据、执行到的步骤、成功/失败证据和下一步。\n";
+      for (const playbook of context.playbookRecommendations) {
+        p += `- ${playbook.id} (${playbook.title})\n`;
+        p += `  适用: ${playbook.appliesTo}; 目标 flag 位置: ${playbook.flagPath}; 常用工具: ${(playbook.tools || []).join(", ")}\n`;
+        for (const [index, step] of (playbook.steps || []).entries()) {
+          p += `  ${index + 1}. ${step}\n`;
+        }
+      }
+      p += "- 如果某 playbook 不适合当前证据，必须明确跳过原因，不要强行套用 payload。\n\n";
+    }
+
+    if (context.skillRecommendations?.length) {
+      p += "Skill 使用要求（辅助 playbook）：\n";
+      p += "- skill 用于补充 playbook 的细节、变体、失败排查和协议/工具用法；不要因为阅读 skill 而偏离本轮 playbook 和计划边界。\n";
+      for (const item of context.skillRecommendations) {
+        p += `- 推荐 skill: ${item.name}，原因: ${item.reason}\n`;
+      }
+      p += "- 如果使用了 skill，必须在日志中输出【Skill 使用】并写明 skill 名称、命中原因、采用了哪些检查项、验证结果。\n";
+      p += "- 如果没有使用某个推荐 skill，必须说明原因，例如 playbook 已足够、与本轮边界不匹配、缺少前置访问、目标证据不足。\n";
+      p += "- skill 只提供打法参考，仍必须以当前靶场证据和授权边界为准，不得跳过证据链直接套用结论。\n\n";
+    }
+
     p += "产物目录要求（强制）：\n";
     p += `- 所有中间文件、Python 脚本、payload、webshell、上传样本、下载结果、字典、扫描结果、笔记都必须放在: ${this.config.artifactDir}\n`;
     p += `- Python/脚本放入: ${scriptsDir}\n`;
@@ -193,6 +218,8 @@ export class Runner {
     p += `- 下载文件/响应保存放入: ${downloadsDir}\n`;
     p += `- 分析笔记/阶段总结放入: ${notesDir}\n`;
     p += "- 不要在项目根目录创建 exploit.py、upload_shell.py、shell.php、.htaccess 等中间文件。\n";
+    p += `- 禁止直接创建、覆盖或改写 ${this.config.artifactDir}/flags.json 和 ${this.config.artifactDir}/flags.txt；flag 输出文件由调度器自动维护。发现 flag 时只需要在日志中原样输出完整 flag 和证据命令。\n`;
+    p += "- 如果需要记录 flag 证据，请写入 notes/downloads 中的新文件，不要自定义 flags.json/flags.txt 的字段或格式。\n";
     p += "- 编写代码前记录文件路径和用途；运行后记录命令、参数、输出摘要和后续影响。\n\n";
 
     p += "日志要求（必须使用中文，尽量详细，实时输出）：\n";

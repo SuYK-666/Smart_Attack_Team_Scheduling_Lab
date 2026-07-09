@@ -1,6 +1,11 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "model": "deepseek/deepseek-v4-flash",
+  "skills": {
+    "paths": [
+      "~/.config/opencode/skills"
+    ]
+  },
   "permission": {
     "*": "allow",
     "bash": "allow",

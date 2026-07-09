@@ -15,6 +15,7 @@ export interface FindingIteration {
   hosts?: string[];
   services?: Array<{ host?: string; port?: number; name?: string }>;
   credentials?: Array<{ username?: string; password?: string; host?: string; service?: string }>;
+  skillsUsed?: Array<{ name?: string; reason?: string; result?: string }>;
   actions?: string[];
   toolCalls?: Array<{ tool?: string; command?: string; purpose?: string; result?: string; impact?: string }>;
   analysisTrail?: Array<{ phase?: string; hypothesis?: string; action?: string; evidence?: string; decision?: string }>;
