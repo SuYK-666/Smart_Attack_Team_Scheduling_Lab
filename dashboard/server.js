@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { createReadStream, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,11 +8,12 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const rootDir = resolve(__dirname, "..");
 const penDir = join(rootDir, ".pen-agent");
 const artifactDir = join(rootDir, "artifacts");
+const historyDir = join(rootDir, "history");
+const historyIndexPath = join(historyDir, "runs.json");
 const webDist = join(__dirname, "web", "dist");
 const port = Number(process.env.DASHBOARD_PORT || 3000);
 const host = process.env.DASHBOARD_HOST || "127.0.0.1";
 let activeRun = null;
-const recentRuns = [];
 
 const contentTypes = {
   ".html": "text/html; charset=utf-8",
@@ -28,16 +29,23 @@ const server = createServer((req, res) => {
     if (url.pathname === "/api/run" && req.method === "GET") return json(res, runStatus());
     if (url.pathname === "/api/run" && req.method === "POST") return readBody(req).then((body) => startRun(body, res)).catch((err) => json(res, { error: err.message }, 400));
     if (url.pathname === "/api/run/stop" && req.method === "POST") return stopRun(res);
-    if (url.pathname === "/api/state") return json(res, readState());
-    if (url.pathname === "/api/status") return json(res, readJson(join(penDir, "status.json"), { phase: "idle" }));
-    if (url.pathname === "/api/flags") return json(res, enrichFlags());
-    if (url.pathname === "/api/logs/tail") return json(res, { lines: tailFile(join(penDir, "stream.log"), Number(url.searchParams.get("lines") || 120)) });
-    if (url.pathname === "/api/artifacts") return json(res, listArtifacts());
-    if (url.pathname === "/api/notes") return json(res, listNotes());
-    if (url.pathname === "/api/notes/read") return json(res, readNote(url.searchParams.get("name") || ""));
-    if (url.pathname === "/api/assets") return json(res, buildAssetGraph().nodes);
-    if (url.pathname === "/api/asset-graph") return json(res, buildAssetGraph());
-    if (url.pathname === "/api/teams") return json(res, buildTeamStatus());
+    if (url.pathname === "/api/history") return json(res, listHistory());
+    if (url.pathname === "/api/state") return json(res, readState(pathsForRun(url.searchParams.get("runId"))));
+    if (url.pathname === "/api/status") {
+      const paths = pathsForRun(url.searchParams.get("runId"));
+      return json(res, readStatus(paths));
+    }
+    if (url.pathname === "/api/flags") return json(res, enrichFlags(pathsForRun(url.searchParams.get("runId"))));
+    if (url.pathname === "/api/logs/tail") {
+      const paths = pathsForRun(url.searchParams.get("runId"));
+      return json(res, { lines: tailFile(join(paths.penDir, "stream.log"), Number(url.searchParams.get("lines") || 120)) });
+    }
+    if (url.pathname === "/api/artifacts") return json(res, listArtifacts(pathsForRun(url.searchParams.get("runId"))));
+    if (url.pathname === "/api/notes") return json(res, listNotes(pathsForRun(url.searchParams.get("runId"))));
+    if (url.pathname === "/api/notes/read") return json(res, readNote(url.searchParams.get("name") || "", pathsForRun(url.searchParams.get("runId"))));
+    if (url.pathname === "/api/assets") return json(res, buildAssetGraph(pathsForRun(url.searchParams.get("runId"))).nodes);
+    if (url.pathname === "/api/asset-graph") return json(res, buildAssetGraph(pathsForRun(url.searchParams.get("runId"))));
+    if (url.pathname === "/api/teams") return json(res, buildTeamStatus(pathsForRun(url.searchParams.get("runId"))));
     if (url.pathname === "/api/requirements") return json(res, requirementStatus());
     if (url.pathname === "/api/events") return events(req, res);
     return staticFile(url.pathname, res);
@@ -47,6 +55,7 @@ const server = createServer((req, res) => {
 });
 
 server.listen(port, host, () => {
+  recoverInterruptedRun();
   console.log(`[dashboard] http://${host}:${port}`);
 });
 
@@ -83,7 +92,7 @@ function runStatus() {
   return {
     running: Boolean(activeRun),
     active: activeRun ? publicRun(activeRun) : null,
-    recent: recentRuns.slice(-5).reverse().map(publicRun),
+    recent: listHistory().slice(0, 8),
   };
 }
 
@@ -143,6 +152,8 @@ function buildToolPath() {
 function startRun(body, res) {
   if (activeRun) return json(res, { error: "agent is already running", run: publicRun(activeRun) }, 409);
 
+  archiveCurrentSnapshot();
+
   const { args, target } = buildAgentArgs(body || {});
   const child = spawn(process.execPath, args, {
     cwd: rootDir,
@@ -162,18 +173,21 @@ function startRun(body, res) {
     status: "running",
   };
   activeRun = run;
-  recentRuns.push(run);
   child.on("exit", (code, signal) => {
     run.status = code === 0 ? "completed" : "failed";
     run.exitCode = code;
     run.signal = signal;
     run.endedAt = new Date().toISOString();
+    archiveRunSnapshot(run);
+    upsertHistory(publicRun(run));
     if (activeRun?.id === run.id) activeRun = null;
   });
   child.on("error", (err) => {
     run.status = "failed";
     run.error = err.message;
     run.endedAt = new Date().toISOString();
+    archiveRunSnapshot(run);
+    upsertHistory(publicRun(run));
     if (activeRun?.id === run.id) activeRun = null;
   });
 
@@ -259,8 +273,36 @@ function staticFile(pathname, res) {
   createReadStream(filePath).pipe(res);
 }
 
-function readState() {
-  return readJson(join(penDir, "state.json"), { iteration: 0, iterations: [], _config: {}, _flagsFound: 0, _flagsNeeded: 0 });
+function pathsForRun(runId) {
+  const id = String(runId || "").trim();
+  if (!id || id === "current") return { penDir, artifactDir, readonly: false, runId: "" };
+  if (!/^[A-Za-z0-9_.-]{1,80}$/.test(id)) throw new Error("invalid run id");
+  const base = join(historyDir, id);
+  return {
+    penDir: join(base, ".pen-agent"),
+    artifactDir: join(base, "artifacts"),
+    readonly: true,
+    runId: id,
+  };
+}
+
+function readState(paths = pathsForRun()) {
+  return readJson(join(paths.penDir, "state.json"), { iteration: 0, iterations: [], _config: {}, _flagsFound: 0, _flagsNeeded: 0 });
+}
+
+function readStatus(paths = pathsForRun()) {
+  const status = readJson(join(paths.penDir, "status.json"), { phase: "idle" });
+  if (!paths.runId) return status;
+  const run = readHistoryIndex().find((item) => item.id === paths.runId);
+  if (!run) return status;
+  return {
+    ...status,
+    phase: run.status || status.phase || "archived",
+    startedAt: run.startedAt || status.startedAt,
+    endedAt: run.endedAt ?? status.endedAt,
+    exitCode: run.exitCode ?? status.exitCode,
+    signal: run.signal || status.signal,
+  };
 }
 
 function readJson(path, fallback) {
@@ -272,18 +314,156 @@ function readJson(path, fallback) {
   }
 }
 
+function listHistory() {
+  return readHistoryIndex()
+    .sort((a, b) => String(b.startedAt || b.id).localeCompare(String(a.startedAt || a.id)))
+    .map((run) => ({ ...run, command: run.command || (run.args ? `node ${maskArgs(run.args).join(" ")}` : "") }));
+}
+
+function readHistoryIndex() {
+  const rows = readJson(historyIndexPath, []);
+  return Array.isArray(rows) ? rows : [];
+}
+
+function writeHistoryIndex(rows) {
+  mkdirSync(historyDir, { recursive: true });
+  writeFileSync(historyIndexPath, JSON.stringify(rows.slice(0, 100), null, 2), "utf-8");
+}
+
+function upsertHistory(run) {
+  const rows = readHistoryIndex();
+  const sanitized = publicHistoryRun(run);
+  const index = rows.findIndex((item) => item.id === sanitized.id);
+  if (index >= 0) rows[index] = { ...rows[index], ...sanitized };
+  else rows.push(sanitized);
+  writeHistoryIndex(rows.sort((a, b) => String(b.startedAt || b.id).localeCompare(String(a.startedAt || a.id))));
+}
+
+function publicHistoryRun(run) {
+  const state = readState(pathsForRun(run.id));
+  const rawFlags = readJson(join(historyDir, run.id, "artifacts", "flags.json"), { count: 0, flags: [] });
+  const flags = normalizeFlagState(rawFlags, state, pathsForRun(run.id));
+  return {
+    id: String(run.id),
+    pid: run.pid,
+    args: run.args ? maskArgs(run.args) : undefined,
+    command: run.command,
+    startedAt: run.startedAt,
+    endedAt: run.endedAt || null,
+    exitCode: run.exitCode ?? null,
+    signal: run.signal || null,
+    status: run.status || "archived",
+    target: run.target || state._config?.target || flags.target || "",
+    flagsFound: flags.count || 0,
+    iterations: state.iteration || state.iterations?.length || 0,
+    summary: state.iterations?.at(-1)?.summary || "",
+  };
+}
+
+function recoverInterruptedRun() {
+  if (activeRun) return;
+  const status = readJson(join(penDir, "status.json"), {});
+  const hasResidualRun = /^(running|stopping)$/i.test(String(status.phase || ""));
+  if (!hasResidualRun) return;
+
+  const archived = archiveCurrentSnapshot({ status: "interrupted", idPrefix: "interrupted" });
+  if (!archived) return;
+
+  writeFileSync(join(penDir, "status.json"), JSON.stringify({
+    ...status,
+    phase: "interrupted",
+    recoveredAt: new Date().toISOString(),
+  }, null, 2), "utf-8");
+  console.log("[dashboard] recovered interrupted run into history");
+}
+
+function archiveCurrentSnapshot(options = {}) {
+  if (activeRun) return;
+  const statePath = join(penDir, "state.json");
+  const logPath = join(penDir, "stream.log");
+  if (!existsSync(statePath) && !existsSync(logPath)) return false;
+
+  const state = readState(pathsForRun());
+  const startedAt = state.iterations?.[0]?.time || statTime(statePath) || statTime(logPath) || new Date().toISOString();
+  const target = state._config?.target || "";
+  const prefix = options.idPrefix || "manual";
+  const id = `${prefix}-${String(startedAt).replace(/[^0-9A-Za-z]/g, "").slice(0, 32) || Date.now()}`;
+  const existing = readHistoryIndex().find((item) => item.id === id || (item.startedAt === startedAt && (item.target || "") === target));
+  if (existing) return false;
+
+  const run = {
+    id,
+    startedAt,
+    endedAt: statTime(logPath) || new Date().toISOString(),
+    status: options.status || "archived",
+    target,
+  };
+  archiveRunSnapshot(run);
+  upsertHistory(run);
+  return true;
+}
+
+function archiveRunSnapshot(run) {
+  if (!run?.id || !/^[A-Za-z0-9_.-]{1,80}$/.test(String(run.id))) return;
+  const base = join(historyDir, String(run.id));
+  const runPenDir = join(base, ".pen-agent");
+  const runArtifactDir = join(base, "artifacts");
+
+  mkdirSync(base, { recursive: true });
+  copyDirIfExists(penDir, runPenDir);
+  copyDirIfExists(artifactDir, runArtifactDir);
+  mkdirSync(runPenDir, { recursive: true });
+  mkdirSync(runArtifactDir, { recursive: true });
+  writeSnapshotStatus(run, join(runPenDir, "status.json"));
+
+  const snapshotRun = publicHistoryRun(run);
+  writeFileSync(join(base, "run.json"), JSON.stringify(snapshotRun, null, 2), "utf-8");
+}
+
+function writeSnapshotStatus(run, statusPath) {
+  const previous = readJson(statusPath, {});
+  writeFileSync(statusPath, JSON.stringify({
+    ...previous,
+    phase: run.status || previous.phase || "archived",
+    startedAt: run.startedAt || previous.startedAt || null,
+    endedAt: run.endedAt || previous.endedAt || null,
+    exitCode: run.exitCode ?? previous.exitCode ?? null,
+    signal: run.signal || previous.signal || null,
+    recoveredAt: run.status === "interrupted" ? new Date().toISOString() : previous.recoveredAt,
+  }, null, 2), "utf-8");
+}
+
+function copyDirIfExists(from, to) {
+  try {
+    if (!existsSync(from)) return;
+    mkdirSync(to, { recursive: true });
+    cpSync(from, to, { recursive: true });
+  } catch (e) {
+    console.error(`[dashboard] failed to copy history dir ${from}: ${e.message}`);
+  }
+}
+
+function statTime(path) {
+  try {
+    if (!existsSync(path)) return "";
+    return statSync(path).mtime.toISOString();
+  } catch {
+    return "";
+  }
+}
+
 function tailFile(path, lines) {
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf-8").split(/\r?\n/).slice(-Math.max(1, lines));
 }
 
-function listArtifacts() {
-  if (!existsSync(artifactDir)) return [];
-  return walk(artifactDir).map((item) => ({ ...item, path: item.path.replace(`${artifactDir}/`, "") }));
+function listArtifacts(paths = pathsForRun()) {
+  if (!existsSync(paths.artifactDir)) return [];
+  return walk(paths.artifactDir).map((item) => ({ ...item, path: item.path.replace(`${paths.artifactDir}/`, "") }));
 }
 
-function listNotes() {
-  const notesDir = join(artifactDir, "notes");
+function listNotes(paths = pathsForRun()) {
+  const notesDir = join(paths.artifactDir, "notes");
   if (!existsSync(notesDir)) return [];
   return readdirSync(notesDir)
     .filter((name) => name.endsWith(".md"))
@@ -299,9 +479,9 @@ function listNotes() {
     });
 }
 
-function readNote(name) {
+function readNote(name, paths = pathsForRun()) {
   if (!/^[A-Za-z0-9_.-]+\.md$/.test(name)) throw new Error("invalid note name");
-  const notesDir = join(artifactDir, "notes");
+  const notesDir = join(paths.artifactDir, "notes");
   const filePath = resolve(notesDir, name);
   if (!filePath.startsWith(resolve(notesDir)) || !existsSync(filePath)) throw new Error("note not found");
   return {
@@ -329,12 +509,12 @@ function walk(dir, depth = 0) {
   return entries;
 }
 
-function enrichFlags() {
-  const rawFlags = readJson(join(artifactDir, "flags.json"), { count: 0, flags: [], updatedAt: null });
-  const state = readState();
-  const logLines = tailFile(join(penDir, "stream.log"), 500);
-  const flags = normalizeFlagState(rawFlags, state);
-  syncFlagFiles(flags);
+function enrichFlags(paths = pathsForRun()) {
+  const rawFlags = readJson(join(paths.artifactDir, "flags.json"), { count: 0, flags: [], updatedAt: null });
+  const state = readState(paths);
+  const logLines = tailFile(join(paths.penDir, "stream.log"), 500);
+  const flags = normalizeFlagState(rawFlags, state, paths);
+  if (!paths.readonly) syncFlagFiles(flags, paths);
   return {
     ...flags,
     flags: (flags.flags || []).map((flag) => ({
@@ -344,7 +524,7 @@ function enrichFlags() {
   };
 }
 
-function normalizeFlagState(rawFlags, state) {
+function normalizeFlagState(rawFlags, state, paths = pathsForRun()) {
   const values = [];
   for (const item of rawFlags.flags || []) {
     if (typeof item === "string") values.push(item);
@@ -353,7 +533,7 @@ function normalizeFlagState(rawFlags, state) {
   }
 
   try {
-    const text = readFileSync(join(artifactDir, "flags.txt"), "utf-8");
+    const text = readFileSync(join(paths.artifactDir, "flags.txt"), "utf-8");
     values.push(...text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
   } catch {}
 
@@ -379,10 +559,10 @@ function normalizeFlagState(rawFlags, state) {
   };
 }
 
-function syncFlagFiles(flags) {
+function syncFlagFiles(flags, paths = pathsForRun()) {
   try {
-    writeFileSync(join(artifactDir, "flags.json"), JSON.stringify(flags, null, 2));
-    writeFileSync(join(artifactDir, "flags.txt"), flags.flags.length ? `${flags.flags.map((item) => item.value).join("\n")}\n` : "");
+    writeFileSync(join(paths.artifactDir, "flags.json"), JSON.stringify(flags, null, 2));
+    writeFileSync(join(paths.artifactDir, "flags.txt"), flags.flags.length ? `${flags.flags.map((item) => item.value).join("\n")}\n` : "");
   } catch (e) {
     console.error(`[dashboard] failed to sync flag files: ${e.message}`);
   }
@@ -390,27 +570,40 @@ function syncFlagFiles(flags) {
 
 function findFlagEvidence(flag, state, logLines) {
   for (const iter of state.iterations || []) {
+    const related = findRelatedFlagEvidence(iter, flag);
+    if (related) {
+      return {
+        iter: iter.iter,
+        method: related.method,
+        summary: related.summary,
+        command: related.command,
+      };
+    }
     if ((iter.flags || []).includes(flag)) {
       return {
         iter: iter.iter,
         method: "supervisor extraction",
-        summary: iter.summary || "",
-        command: findRelatedCommand(iter, flag),
-      };
-    }
-    const command = findRelatedCommand(iter, flag);
-    if (command) {
-      return {
-        iter: iter.iter,
-        method: "tool output",
-        summary: iter.summary || "",
-        command,
+        summary: summarizeFlagFromIteration(iter, flag),
+        command: "",
       };
     }
   }
   const line = logLines.find((item) => item.includes(flag));
   if (line) return { iter: null, method: "stream.log", summary: line.slice(0, 240), command: "" };
   return { iter: null, method: "streamed flag file", summary: "flag 已流式写入，来源命令待后续结构化补充", command: "" };
+}
+
+function findRelatedFlagEvidence(iter, flag) {
+  for (const call of iter.toolCalls || []) {
+    const text = `${call.command || ""}\n${call.result || ""}\n${call.impact || ""}`;
+    if (!text.includes(flag)) continue;
+    return {
+      method: call.tool ? `${call.tool} output` : "tool output",
+      summary: summarizeFlagToolCall(call, flag),
+      command: call.command || "",
+    };
+  }
+  return null;
 }
 
 function findRelatedCommand(iter, flag) {
@@ -421,11 +614,51 @@ function findRelatedCommand(iter, flag) {
   return "";
 }
 
-function buildAssetGraph() {
-  const state = readState();
-  const flags = readJson(join(artifactDir, "flags.json"), { count: 0, flags: [] });
-  const aliases = collectAssetAliases();
-  const flagEvidence = collectFlagEvidence();
+function summarizeFlagToolCall(call, flag) {
+  const pieces = [];
+  if (call.purpose) pieces.push(`目的：${call.purpose}`);
+  if (call.result) pieces.push(`结果：${clipTextAroundFlag(call.result, flag, 220)}`);
+  if (call.impact) pieces.push(`影响：${call.impact}`);
+  if (!pieces.length) pieces.push(`命令输出中出现 ${flag}`);
+  return pieces.join("；");
+}
+
+function summarizeFlagFromIteration(iter, flag) {
+  const snippets = [
+    ...(iter.analysisTrail || []).flatMap((item) => [item.evidence, item.decision, item.action]),
+    ...(iter.actions || []),
+    ...(iter.intel || []),
+    ...(iter.access || []),
+    ...(iter.nextSteps || []),
+    iter.summary,
+  ].filter(Boolean).map((item) => String(item));
+
+  const direct = snippets.find((item) => item.includes(flag));
+  if (direct) return clipTextAroundFlag(direct, flag, 260);
+
+  const flagBody = flag.match(/\{([^}]+)\}/)?.[1]?.toLowerCase() || "";
+  const token = flagBody.split(/[_-]/).find((part) => part.length >= 4);
+  const related = token ? snippets.find((item) => item.toLowerCase().includes(token)) : "";
+  if (related) return clipTextAroundFlag(related, flag, 260);
+
+  return `该 flag 在第 ${iter.iter} 轮结构化结果中被识别；未找到更细粒度的命令证据。`;
+}
+
+function clipTextAroundFlag(text, flag, maxLength) {
+  const value = String(text || "").replace(/\s+/g, " ").trim();
+  if (value.length <= maxLength) return value;
+  const index = value.indexOf(flag);
+  if (index < 0) return `${value.slice(0, maxLength - 15)}... [truncated]`;
+  const before = Math.max(0, index - Math.floor((maxLength - flag.length) / 2));
+  const after = Math.min(value.length, before + maxLength);
+  return `${before > 0 ? "... " : ""}${value.slice(before, after)}${after < value.length ? " ..." : ""}`;
+}
+
+function buildAssetGraph(paths = pathsForRun()) {
+  const state = readState(paths);
+  const flags = readJson(join(paths.artifactDir, "flags.json"), { count: 0, flags: [] });
+  const aliases = collectAssetAliases(paths);
+  const flagEvidence = collectFlagEvidence(paths);
   const nodes = new Map();
   const edges = [];
   const target = state._config?.target || flags.target || "unknown-target";
@@ -450,25 +683,14 @@ function buildAssetGraph() {
     for (const service of iter.services || []) {
       const hostInfo = classifyGraphHost(service.host || entryId, iterationText(iter), targetIdentity) || { id: entryId, name: target, status: "entry", zone: "external-entry" };
       const host = hostInfo.id;
-      const serviceId = hostInfo.status === "entry" && String(service.port || "") === String(targetIdentity.port || "")
-        ? `${host}/service`
-        : `${host}:${service.port || "?"}`;
       addNode(nodes, host, {
         name: displayNodeName(host, hostInfo.name, aliases),
         inferredZone: hostInfo.zone,
         status: hostInfo.status,
-        firstSeenIter: iter.iter,
-        lastSeenIter: iter.iter,
-      });
-      addNode(nodes, serviceId, {
-        name: serviceId,
-        inferredZone: inferZone(service.name),
-        status: "service",
         services: [{ port: service.port, name: service.name || "unknown" }],
         firstSeenIter: iter.iter,
         lastSeenIter: iter.iter,
       });
-      addEdge(edges, host, serviceId, "service", iter.iter, service.name || "");
     }
     for (const call of iter.toolCalls || []) {
       for (const parsed of extractUrls(call.command || "")) {
@@ -498,15 +720,15 @@ function buildAssetGraph() {
   return { nodes: [...nodes.values()], edges };
 }
 
-function collectAssetAliases() {
+function collectAssetAliases(paths = pathsForRun()) {
   const aliases = new Map();
   const namesByIp = new Map();
   const texts = [
-    readText(join(artifactDir, "notes", "flag_evidence.md")),
-    readText(join(artifactDir, "notes", "round1_summary.md")),
-    readText(join(artifactDir, "notes", "round2_summary.md")),
-    readText(join(artifactDir, "downloads", "entry_index_response.txt")),
-    readText(join(artifactDir, "downloads", "index.html")),
+    readText(join(paths.artifactDir, "notes", "flag_evidence.md")),
+    readText(join(paths.artifactDir, "notes", "round1_summary.md")),
+    readText(join(paths.artifactDir, "notes", "round2_summary.md")),
+    readText(join(paths.artifactDir, "downloads", "entry_index_response.txt")),
+    readText(join(paths.artifactDir, "downloads", "index.html")),
   ].filter(Boolean);
 
   for (const text of texts) {
@@ -537,12 +759,12 @@ function rememberAlias(aliases, namesByIp, name, ip) {
   if (!namesByIp.has(cleanIp)) namesByIp.set(cleanIp, cleanName);
 }
 
-function collectFlagEvidence() {
+function collectFlagEvidence(paths = pathsForRun()) {
   const evidence = new Map();
   const texts = [
-    readText(join(artifactDir, "notes", "flag_evidence.md")),
-    readText(join(artifactDir, "notes", "round1_summary.md")),
-    readText(join(artifactDir, "notes", "round2_summary.md")),
+    readText(join(paths.artifactDir, "notes", "flag_evidence.md")),
+    readText(join(paths.artifactDir, "notes", "round1_summary.md")),
+    readText(join(paths.artifactDir, "notes", "round2_summary.md")),
   ].filter(Boolean);
   for (const text of texts) {
     for (const match of text.matchAll(/FLAG\{[^}\s]{3,128}\}/g)) {
@@ -631,6 +853,8 @@ function classifyGraphHost(value, context, targetIdentity) {
     return { id: host.id, name: host.id, zone: "routing", status: "gateway", edgeType: "route" };
   }
 
+  if (isNetworkArtifactHost(host.hostname)) return null;
+
   return { id: host.id, name: host.id, zone: inferHostZone(host.hostname), status: "discovered", edgeType: "discovered-host" };
 }
 
@@ -658,6 +882,16 @@ function isCidrNetworkHost(host, context = "") {
 
 function isRouteNextHop(hostname, context = "") {
   return new RegExp(`\\b(?:via|gateway|gw|next-hop)\\s+${escapeRegExp(hostname)}\\b`, "i").test(context);
+}
+
+function isNetworkArtifactHost(hostname) {
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname)) return false;
+  const parts = hostname.split(".").map((item) => Number(item));
+  if (parts.some((item) => item < 0 || item > 255)) return true;
+  if (parts[3] === 255) return true;
+  if (parts[3] === 0) return true;
+  if (parts[3] === 1 && /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(hostname)) return true;
+  return false;
 }
 
 function inferHostZone(hostname) {
@@ -739,10 +973,11 @@ function requirementStatus() {
   ];
 }
 
-function buildTeamStatus() {
-  const state = readState();
+function buildTeamStatus(paths = pathsForRun()) {
+  const state = readState(paths);
   const iterations = state.iterations || [];
   const latest = iterations.at(-1) || {};
+  const noteCount = listNotes(paths).length;
   const teams = [
     {
       id: "recon",
@@ -805,9 +1040,9 @@ function buildTeamStatus() {
       status: countFlags(iterations) ? "active" : "pending",
       tasks: [
         taskFrom("flags", "整理 flag 与证据链", countFlags(iterations), countFlags(iterations) ? "done" : "pending", latest.summary),
-        taskFrom("notes", "维护阶段总结和交付笔记", listNotes().length, listNotes().length ? "done" : "pending", "artifacts/notes"),
+        taskFrom("notes", "维护阶段总结和交付笔记", noteCount, noteCount ? "done" : "pending", "artifacts/notes"),
       ],
-      outputs: [`flag ${countFlags(iterations)} 个`, `笔记 ${listNotes().length} 个`],
+      outputs: [`flag ${countFlags(iterations)} 个`, `笔记 ${noteCount} 个`],
     },
   ];
 
@@ -921,11 +1156,12 @@ function events(req, res) {
   });
   const send = () => {
     res.write(`event: update\ndata: ${JSON.stringify({
-      status: readJson(join(penDir, "status.json"), { phase: "idle" }),
+      status: readStatus(),
       flags: enrichFlags(),
       state: readState(),
       graph: buildAssetGraph(),
       run: runStatus(),
+      history: listHistory(),
       teams: buildTeamStatus(),
       logLines: tailFile(join(penDir, "stream.log"), 120),
       time: new Date().toISOString(),

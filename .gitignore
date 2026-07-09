@@ -8,3 +8,5 @@ proxy/proxy-client
 proxy/build/
 docs/
 backup/
+history/
+.DS_Store

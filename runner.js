@@ -251,6 +251,15 @@ export class Runner {
     p += "- 本轮只完成上述目标；完成后立即输出【本轮停止】，不要继续扩展到下一阶段。\n";
     p += "- 如果提前发现 flag 或高危漏洞，可以完成必要取证，但不要因此展开新的大范围任务；把后续动作写入下一轮建议。\n\n";
 
+    p += "已获访问后的推进规则（通用，不绑定某个靶场）：\n";
+    p += "- 一旦通过 RCE、webshell、命令执行、SSH、SSRF 回显或类似方式获得入口节点访问，下一阶段必须先做后渗透基础枚举，而不是继续在入口页面重复扫目录或猜参数。\n";
+    p += "- 基础枚举最小集合：id; whoami; hostname; pwd; uname -a; ip addr; ip route; cat /etc/hosts; cat /etc/resolv.conf; env | sort; command -v curl wget nc nmap python3 python bash sh ssh ftp redis-cli smbclient ldapsearch mysql psql。\n";
+    p += "- 内网扫描范围只能从实际证据推导：接口 CIDR、路由表、hosts、DNS search domain、应用配置、源码、下载文件、页面泄露和已验证服务返回；不要写死某个靶场的 IP 段。\n";
+    p += "- 使用已控入口节点作为观测点做小范围服务验证，优先端口：80,443,8080,8000,8009,8983,3000,5000,5984,6379,21,22,139,389,445,3306,5432,9000,9001。\n";
+    p += "- 服务发现阶段只确认连通性、banner、状态码、版本、认证状态和最小页面证据；除非本轮计划要求利用，否则不要把所有发现的服务在同一轮全部打穿。\n";
+    p += "- 将发现的服务按指纹映射到 playbook：ThinkPHP、Spring、Struts、Solr、GitLab/Gogs、Redis、Samba/SMB、CouchDB、ProFTPD、MinIO、LDAP、数据库。下一轮优先按服务证据执行对应 playbook。\n";
+    p += "- 每个节点最多一个 flag。已确认当前节点 flag 后，停止在该节点继续寻找第二个 flag，转向未覆盖节点或把线索写入下一轮建议。\n\n";
+
     if (context.playbookRecommendations?.length) {
       p += "漏洞 Playbook（优先执行）：\n";
       p += "- 本轮应优先按命中的 playbook 推进；playbook 是具体步骤模板，不是越权许可，只有当目标服务、版本、端口或页面证据匹配时才执行。\n";
