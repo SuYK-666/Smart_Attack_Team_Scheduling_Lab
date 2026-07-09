@@ -278,12 +278,29 @@ watch(
     </aside>
 
     <main class="content">
-      <header class="topbar">
+      <header class="topbar" :class="{ 'overview-topbar': active === 'overview' }">
         <div>
           <h1>{{ nav.find(([key]) => key === active)?.[1] }}</h1>
           <p>{{ store.target }}</p>
         </div>
-        <div class="status-pill" :class="phaseClass">{{ store.effectivePhase }}</div>
+        <div v-if="active === 'overview'" class="topbar-status">
+          <div class="status-pill" :class="phaseClass">{{ store.effectivePhase }}</div>
+          <dl>
+            <div>
+              <dt>阶段</dt>
+              <dd>{{ store.status.plan || "无" }}</dd>
+            </div>
+            <div>
+              <dt>输出</dt>
+              <dd>{{ store.status.bytes || 0 }} bytes</dd>
+            </div>
+            <div>
+              <dt>更新时间</dt>
+              <dd>{{ store.lastRefresh || "-" }}</dd>
+            </div>
+          </dl>
+        </div>
+        <div v-else class="status-pill" :class="phaseClass">{{ store.effectivePhase }}</div>
       </header>
 
       <section v-if="active === 'start'" class="start-layout">
@@ -418,7 +435,7 @@ watch(
           <span>工具调用</span>
           <strong>{{ store.toolCallCount }}</strong>
         </article>
-        <article class="panel overview-pair overview-focus overview-full">
+        <article class="panel overview-pair overview-focus overview-full overview-position">
           <div class="section-title compact">
             <div>
               <h2>当前攻击位置</h2>
@@ -436,7 +453,7 @@ watch(
             <li v-for="item in latest?.nextSteps || []" :key="item">{{ item }}</li>
           </ul>
         </article>
-        <article class="panel overview-pair overview-full">
+        <article class="panel overview-pair overview-full overview-success">
           <h2>已成功攻击</h2>
           <div v-if="successfulAttacks.length" class="success-list">
             <article v-for="item in successfulAttacks" :key="item.iter" class="success-item">
@@ -451,14 +468,6 @@ watch(
             </article>
           </div>
           <p v-else>暂未记录成功利用或 flag。</p>
-        </article>
-        <article class="panel overview-pair">
-          <h2>运行状态</h2>
-          <dl>
-            <dt>阶段</dt><dd>{{ store.status.plan || "无" }}</dd>
-            <dt>输出</dt><dd>{{ store.status.bytes || 0 }} bytes</dd>
-            <dt>更新时间</dt><dd>{{ store.lastRefresh || "-" }}</dd>
-          </dl>
         </article>
         <article class="panel overview-pair">
           <h2>Flag 获取情况</h2>

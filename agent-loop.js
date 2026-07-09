@@ -49,17 +49,23 @@ export async function startAgent(config) {
       staleLoops,
       lastSummary: prevSummary,
     });
+    const promptWhiteboardSummary = whiteboard.summary({
+      maxIterations: 3,
+      maxFieldLength: 320,
+      maxListItems: 8,
+    });
     const skillRecommendations = recommendSkills({
       loopPlan,
       iterations: whiteboard.iterations,
-      whiteboardSummary: whiteboard.summary(),
+      whiteboardSummary: promptWhiteboardSummary,
       lastOutput: prevSummary,
     });
     const playbookRecommendations = recommendPlaybooks({
       loopPlan,
       iterations: whiteboard.iterations,
-      whiteboardSummary: whiteboard.summary(),
+      whiteboardSummary: promptWhiteboardSummary,
       lastOutput: prevSummary,
+      foundFlags: flagCounter.all(),
     });
 
     const flagTarget = config.maxFlags ? `${config.flagsNeeded}-${config.maxFlags}` : `${config.flagsNeeded}+`;
@@ -81,7 +87,7 @@ export async function startAgent(config) {
       flagsNeeded: config.flagsNeeded,
       maxFlags: config.maxFlags,
       foundFlags: flagCounter.all(),
-      whiteboardSummary: whiteboard.summary(),
+      whiteboardSummary: promptWhiteboardSummary,
       lastOutput: prevSummary,
     };
 

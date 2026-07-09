@@ -22,7 +22,7 @@ const SKILL_RULES = [
   {
     name: "cmdi-command-injection",
     reason: "发现命令执行、RCE、框架漏洞或系统命令回显线索",
-    pattern: /rce|命令执行|command injection|cmdi|exec|shell|反弹|whoami|id|thinkphp|struts|ognl|spring|solr/i,
+    pattern: /rce|命令执行|command injection|cmdi|exec|shell|反弹|whoami|id|thinkphp|struts|ognl|spring|solr|samba|smb|cve-2017-7494/i,
   },
   {
     name: "api-recon-and-docs",
@@ -41,8 +41,8 @@ const SKILL_RULES = [
   },
   {
     name: "unauthorized-access-common-services",
-    reason: "发现 Redis、CouchDB、MinIO、Docker、Elasticsearch 等常见未授权服务",
-    pattern: /redis|couchdb|minio|s3|elasticsearch|mongo|mongodb|memcached|docker api|未授权|anonymous|bucket/i,
+    reason: "发现 Redis、CouchDB、MinIO、Samba、FTP、Docker、Elasticsearch 等常见未授权服务",
+    pattern: /redis|couchdb|minio|s3|samba|smb|cifs|netbios|ftp|proftpd|mod_copy|elasticsearch|mongo|mongodb|memcached|docker api|未授权|anonymous|bucket/i,
   },
   {
     name: "tunneling-and-pivoting",
