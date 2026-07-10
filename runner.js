@@ -279,10 +279,9 @@ export class Runner {
     p += "- 一旦通过 RCE、webshell、命令执行、SSH、SSRF 回显或类似方式获得入口节点访问，先稳定当前访问点，但不要为了反连/C2 阻塞基础枚举。\n";
     p += "- 通用后渗透顺序：\n";
     p += "  1) 立即确认权限和执行点：id; whoami; hostname; pwd; uname -a。\n";
-    p += "  2) 若入口是 Spring4Shell/AccessLogValve webshell，立刻关闭 AccessLogValve：class.module.classLoader.resources.context.parent.pipeline.first.enabled=false，避免日志继续污染 JSP。\n";
-    p += "  3) 立刻做最小网络枚举并保存证据：ip addr; ip route; cat /etc/hosts; cat /etc/resolv.conf; env | sort; command -v curl wget nc nmap python3 python bash sh ssh ftp redis-cli smbclient ldapsearch mysql psql。\n";
-    p += "  4) 把接口 CIDR、默认路由、DNS search domain、hosts、LAB_ROUTES/ROUTES 等环境变量写入 notes，作为内网扫描范围依据。\n";
-    p += "  5) 基础枚举完成后再尝试持久化通道；持久化失败不能阻止本轮交付内网路由和服务发现证据。\n";
+    p += "  2) 立刻做最小网络枚举并保存证据：ip addr; ip route; cat /etc/hosts; cat /etc/resolv.conf; env | sort; command -v curl wget nc nmap python3 python bash sh ssh ftp redis-cli smbclient ldapsearch mysql psql。\n";
+    p += "  3) 把接口 CIDR、默认路由、DNS search domain、hosts、LAB_ROUTES/ROUTES 等环境变量写入 notes，作为内网扫描范围依据。\n";
+    p += "  4) 基础枚举完成后再尝试持久化通道；持久化失败不能阻止本轮交付内网路由和服务发现证据。\n";
     if (this.config.callbackHost) {
       p += `- 回连地址已配置: ${this.config.callbackHost}；反向 shell/C2 只能连接该地址，不要使用 localhost 作为远端回连目标。\n`;
       p += "- 持久化通道优先级（每类最多尝试 2 次，失败则记录原因并继续）：\n";
@@ -292,15 +291,28 @@ export class Runner {
     } else {
       p += "- 当前未配置 PEN_AGENT_CALLBACK_HOST/--callback-host；不要编造反连地址，不要让目标连接 localhost。可先完成基础枚举、服务发现和备用 webshell，汇总中明确需要 callback host 后再尝试 C2。\n";
     }
+    p += "- 如果入口节点存在 DMZ 出站防火墙（无法出站到公网、ping 不通外部、反向 shell 无响应），不要反复尝试反向 shell；改用 HTTP 轮询 webshell/CGI 执行命令，每一轮 POST 新命令获取输出。\n";
     p += "- 内网扫描范围只能从实际证据推导：接口 CIDR、路由表、hosts、DNS search domain、应用配置、源码、下载文件、页面泄露和已验证服务返回；不要写死某个靶场的 IP 段。\n";
     p += "- 使用已控入口节点作为观测点做小范围服务验证，优先端口：80,443,8080,8000,8009,8983,3000,5000,5984,6379,21,22,139,389,445,3306,5432,9000,9001。\n";
     p += "- 服务发现阶段只确认连通性、banner、状态码、版本、认证状态和最小页面证据；除非本轮计划要求利用，否则不要把所有发现的服务在同一轮全部打穿。\n";
-    p += "- 将发现的服务按指纹映射到 playbook：ThinkPHP、Spring、Struts、Solr、GitLab/Gogs、Redis、Samba/SMB、CouchDB、ProFTPD、MinIO、LDAP、数据库。下一轮优先按服务证据执行对应 playbook。\n";
+    p += "- 日志卫生强制要求：不要把整页 HTML/CSS/JS 输出到主日志。网页响应只输出 HTTP code、Location、Server、title、关键 grep 和前 20 行响应头；需要保留全文时保存到 artifacts/downloads 并在日志中摘要路径和关键发现。\n";
+    p += "- 将发现的服务按指纹映射到 playbook：ThinkPHP、Spring、Apache HTTPD、Struts、Solr、GitLab/Gogs、Redis、Samba/SMB、CouchDB、ProFTPD、MinIO、LDAP、数据库。下一轮优先按服务证据执行对应 playbook。\n";
     p += "- 每个节点最多一个 flag。已确认当前节点 flag 后，停止在该节点继续寻找第二个 flag，转向未覆盖节点或把线索写入下一轮建议。\n\n";
 
+    if (context.skillRecommendations?.length) {
+      p += "Skill 加载要求（必须优先执行，playbook 的前提）：\n";
+      p += "- 本轮推荐的 skill 必须用 skill 工具逐个加载阅读。Skill 提供漏洞原理、协议细节、payload 变体和失败排查方法，是执行对应 playbook 的知识基础。\n";
+      for (const item of context.skillRecommendations) {
+        p += `- 推荐 skill: ${item.name}，原因: ${item.reason}\n`;
+      }
+      p += "- 每个加载的 skill 必须在日志中输出【Skill 使用】，写明 skill 名称、命中原因、采用了哪些检查项、验证结果。\n";
+      p += "- 如果某个推荐 skill 与当前目标证据不匹配，可以跳过并说明原因。\n";
+      p += "- Skill 只提供打法参考，仍必须以当前靶场证据和授权边界为准，不得跳过证据链直接套用结论。\n\n";
+    }
+
     if (context.playbookRecommendations?.length) {
-      p += "漏洞 Playbook（优先执行）：\n";
-      p += "- 本轮应优先按命中的 playbook 推进；playbook 是具体步骤模板，不是越权许可，只有当目标服务、版本、端口或页面证据匹配时才执行。\n";
+      p += "漏洞 Playbook（基于 skill 原理执行的具体步骤）：\n";
+      p += "- 加载对应 skill 后，按 playbook 步骤推进；playbook 是 skill 原理在靶场中的操作模板，不是独立的知识来源。\n";
       p += "- 使用 playbook 时必须输出【Playbook 使用】，写明 playbook id、命中证据、执行到的步骤、成功/失败证据和下一步。\n";
       for (const playbook of context.playbookRecommendations) {
         p += `- ${playbook.id} (${playbook.title})\n`;
@@ -310,17 +322,6 @@ export class Runner {
         }
       }
       p += "- 如果某 playbook 不适合当前证据，必须明确跳过原因，不要强行套用 payload。\n\n";
-    }
-
-    if (context.skillRecommendations?.length) {
-      p += "Skill 使用要求（辅助 playbook）：\n";
-      p += "- skill 用于补充 playbook 的细节、变体、失败排查和协议/工具用法；不要因为阅读 skill 而偏离本轮 playbook 和计划边界。\n";
-      for (const item of context.skillRecommendations) {
-        p += `- 推荐 skill: ${item.name}，原因: ${item.reason}\n`;
-      }
-      p += "- 如果使用了 skill，必须在日志中输出【Skill 使用】并写明 skill 名称、命中原因、采用了哪些检查项、验证结果。\n";
-      p += "- 如果没有使用某个推荐 skill，必须说明原因，例如 playbook 已足够、与本轮边界不匹配、缺少前置访问、目标证据不足。\n";
-      p += "- skill 只提供打法参考，仍必须以当前靶场证据和授权边界为准，不得跳过证据链直接套用结论。\n\n";
     }
 
     const targetGuide = recommendTargetGuide(this.config, context);
@@ -364,6 +365,7 @@ export class Runner {
     p += "- 如果 445/139 端口可达但缺少 smbclient、mount.cifs、python3+impacket 或稳定 TCP 隧道，应停止重复裸 TCP 尝试，把该目标记录为“TCP 可达但缺少 SMB 协议客户端/隧道”。\n";
     p += "- 发现协议客户端缺失后，优先寻找具备工具的内网跳板节点、开发机或已控主机；如果存在 dev/workstation/bastion/jump host，应评估是否可在该节点上运行协议客户端，或建立 TCP 隧道后在本机使用协议客户端。\n";
     p += "- 如果靶场页面、README、配置文件或数据库中已经给出 jump/dev/MinIO/Samba 等凭据或服务级捷径，要优先把它们作为证据驱动路径验证；不要只尝试通用默认密码。\n";
+    p += "- 以下 local-goad 规则只在已出现 10.80.*、corp.local 或 local-goad 证据时适用；sentinel/10.92 靶场不要套用这些 10.80 示例。\n";
     p += "- 对 local-goad 形态的 Samba，优先目标是读取 //files01/myshare/flag.txt；如果用户授权范围允许访问公开 jump01 SSH 端口，可建立本机到 files01:445 的端口转发后使用本机 smbclient；如果已通过入口或内网凭据进入 dev01，则直接在 dev01 上运行 smbclient。\n";
     p += "- 对 local-goad 形态的 MinIO，公开对象路径通常是 http://minio01:9000/flag/flag.txt 或 http://10.80.30.50:9000/flag/flag.txt；若需要认证，优先验证已发现的 MinIO root 凭据，而不是只猜 minioadmin/minioadmin。\n";
     p += "- 对 files01、db01、ldap01 等协议型节点，汇总时必须写清楚：端口连通性、已检查的客户端工具、失败原因、下一步需要的跳板/隧道/凭据，而不是简单写“失败”。\n\n";

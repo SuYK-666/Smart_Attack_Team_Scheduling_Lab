@@ -321,7 +321,7 @@ function basicExtract(output) {
 
 function extractPlaybooksUsed(output) {
   const playbooks = [];
-  const idPattern = /((?:thinkphp|spring4shell|struts2|solr|gitlab|gogs|redis|samba|couchdb|proftpd|minio)[a-z0-9-]*)/gi;
+  const idPattern = /((?:thinkphp|struts2|solr|gitlab|gogs|redis|samba|couchdb|proftpd|minio|apache-httpd)[a-z0-9-]*)/gi;
   const lines = output.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];

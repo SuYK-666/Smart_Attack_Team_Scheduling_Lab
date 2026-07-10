@@ -59,6 +59,8 @@ function isCommonFlag(flag) {
   if (!/(ctf|flag)/i.test(prefix)) return false;
   if (/^\d+$/.test(prefix)) return false;
   if (PLACEHOLDER_VALUES.has(normalized)) return false;
+  if (/[*?]/.test(inner)) return false;
+  if (/\b(?:your|example|sample|placeholder|expected|format|todo|redacted)\b/i.test(inner)) return false;
   if (/^x{3,}$/i.test(inner)) return false;
   if (/^\.+$/.test(inner)) return false;
 

