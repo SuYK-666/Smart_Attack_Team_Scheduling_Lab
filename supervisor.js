@@ -118,7 +118,7 @@ function mergeWithFallback(parsed, fallback) {
     newFlags: sanitizeFlags(mergeUnique(parsed.newFlags, fallback.newFlags)),
     newHosts: mergeUnique(parsed.newHosts, fallback.newHosts),
     newServices: parsed.newServices?.length ? parsed.newServices : fallback.newServices,
-    newCredentials: parsed.newCredentials?.length ? parsed.newCredentials : fallback.newCredentials,
+    newCredentials: sanitizeCredentials(parsed.newCredentials?.length ? parsed.newCredentials : fallback.newCredentials),
     skillsUsed: parsed.skillsUsed?.length ? parsed.skillsUsed : fallback.skillsUsed,
     playbooksUsed: parsed.playbooksUsed?.length ? parsed.playbooksUsed : fallback.playbooksUsed,
     keyActions: parsed.keyActions?.length ? parsed.keyActions : fallback.keyActions,
@@ -166,7 +166,9 @@ function filterFindingsByScope(findings, config = {}) {
   }
 
   const intel = (findings.intel || []).filter((item) => !containsOutOfScopePublicOrigin(item, { targetHost, targetPort, scopeMode }));
-  const nextSteps = (findings.nextSteps || []).filter((item) => !containsOutOfScopePublicOrigin(item, { targetHost, targetPort, scopeMode }));
+  const nextSteps = (findings.nextSteps || [])
+    .filter((item) => !containsOutOfScopePublicOrigin(item, { targetHost, targetPort, scopeMode }))
+    .filter((item) => !isUnsafeDirectPrivateScanStep(item));
   if (intel.length !== (findings.intel || []).length) outOfScope.push(`已过滤提到 ${targetHost} 其他端口的情报`);
   if (nextSteps.length !== (findings.nextSteps || []).length) outOfScope.push(`已过滤提到 ${targetHost} 其他端口的下一步建议`);
 
@@ -190,6 +192,10 @@ function filterFindingsByScope(findings, config = {}) {
       },
     ],
   };
+}
+
+function isUnsafeDirectPrivateScanStep(text) {
+  return /(?:从本机|本地|外部|直接).{0,20}(?:扫描|访问|探测).{0,40}(?:10\.\d+\.\d+\.0\/\d+|172\.(?:1[6-9]|2\d|3[0-1])\.\d+\.0\/\d+|192\.168\.\d+\.0\/\d+|内网|私网)/i.test(String(text || ""));
 }
 
 function containsOutOfScopePublicOrigin(text, policy) {
@@ -290,7 +296,7 @@ function basicExtract(output) {
     newFlags: flags,
     newHosts: hosts,
     newServices: [],
-    newCredentials: dedupeCreds(creds),
+    newCredentials: sanitizeCredentials(creds),
     skillsUsed,
     playbooksUsed,
     keyActions,
@@ -587,6 +593,28 @@ function dedupeCreds(creds) {
   });
 }
 
+function sanitizeCredentials(creds = []) {
+  if (!Array.isArray(creds)) return [];
+  return dedupeCreds(creds.filter((credential) => {
+    const username = String(credential?.username || "");
+    const password = String(credential?.password || "");
+    const host = String(credential?.host || "");
+    const service = String(credential?.service || "");
+    const context = `${username}:${password} ${host} ${service}`;
+
+    if (!isLikelyCredential({ username, password }, context, 0)) return false;
+    if (isValidIPv4(username)) return false;
+    if (/^(?:FUZZ|wordlist|KEYWORD|Address|PortProcess)$/i.test(username)) return false;
+    if (/^\d{4}-\d{2}-\d{2}T/.test(username)) return false;
+    if (/^(?:fe80|ff0[12]|[0-9a-f]{1,2})$/i.test(username) && /:/.test(password)) return false;
+    if (/^(?:[0-9a-f]{2}:){2,}[0-9a-f]{2}$/i.test(`${username}:${password}`)) return false;
+    if (/^[\d.]+$/.test(username) || /^[\d.]+$/.test(password)) return false;
+    if (/\s|，|。|、/.test(password)) return false;
+
+    return true;
+  })).slice(0, 20);
+}
+
 function isLikelyCredential(credential, output, index) {
   const username = String(credential.username || "");
   const password = String(credential.password || "");
@@ -594,6 +622,10 @@ function isLikelyCredential(credential, output, index) {
   const context = output.slice(Math.max(0, index - 80), index + pair.length + 80);
 
   if (!username || !password) return false;
+  if (isValidIPv4(username)) return false;
+  if (/^(?:FUZZ|wordlist|KEYWORD|Address|PortProcess)$/i.test(username)) return false;
+  if (/^\d{4}-\d{2}-\d{2}T/.test(username)) return false;
+  if (/^(?:fe80|ff0[12]|[0-9a-f]{1,2})$/i.test(username) && /:/.test(password)) return false;
   if (/^(https?|ftp|smb|redis|jdbc|postgresql|mysql|mongodb|ldap)$/i.test(username)) return false;
   if (/^(http|https|content-type|user-agent|accept|host|location|href|src|url|path|font-family|background|color|width|height|margin|padding|border|class|style)$/i.test(username)) return false;
   if (/^[a-f0-9]{8,}$/i.test(username) && /^[a-f0-9]{8,}$/i.test(password)) return false;

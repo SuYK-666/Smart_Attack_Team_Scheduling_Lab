@@ -152,7 +152,8 @@ export class Whiteboard {
       if (iter.rewardEvaluation) {
         lines.push(`  Reward: ${clipField(`${iter.rewardEvaluation.level || "?"}: ${iter.rewardEvaluation.reason || ""}`, maxFieldLength)}`);
       }
-      if (iter.nextSteps?.length) lines.push(`  Next: ${clipList(iter.nextSteps, maxListItems, maxFieldLength).join("; ")}`);
+      const safeNextSteps = (iter.nextSteps || []).filter((item) => !isUnsafeDirectPrivateScanStep(item));
+      if (safeNextSteps.length) lines.push(`  Next: ${clipList(safeNextSteps, maxListItems, maxFieldLength).join("; ")}`);
     }
     return lines.join("\n");
   }
@@ -176,6 +177,10 @@ export class Whiteboard {
   getFlagsNeeded() {
     return this.state._flagsNeeded || 0;
   }
+}
+
+function isUnsafeDirectPrivateScanStep(text) {
+  return /(?:从本机|本地|外部|直接).{0,20}(?:扫描|访问|探测).{0,40}(?:10\.\d+\.\d+\.0\/\d+|172\.(?:1[6-9]|2\d|3[0-1])\.\d+\.0\/\d+|192\.168\.\d+\.0\/\d+|内网|私网)/i.test(String(text || ""));
 }
 
 function clipField(value, maxLength) {

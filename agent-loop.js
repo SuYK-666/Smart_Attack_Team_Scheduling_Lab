@@ -1,4 +1,6 @@
 import chalk from "chalk";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { FlagCounter } from "./flag-counter.js";
@@ -12,6 +14,8 @@ import { recommendSkills } from "./skill-router.js";
 import { recommendPlaybooks } from "./vulnerability-playbooks.js";
 
 export async function startAgent(config) {
+  prepareAgentWorkspace(config);
+
   const whiteboard = new Whiteboard(config.workDir);
   const flagCounter = new FlagCounter(config.flagPattern);
   const flagStore = new FlagStore(config.artifactDir, config);
@@ -33,6 +37,7 @@ export async function startAgent(config) {
 
   console.log(chalk.green(`[system] opencode backend: ${config.attachUrl}`));
   console.log(chalk.green(`[system] artifact dir: ${config.artifactDir}`));
+  console.log(chalk.green(`[system] isolated agent work dir: ${config.agentWorkDir}`));
   console.log(chalk.green(`[system] estimated max flags: ${config.maxFlags ?? "unknown"}; stop still depends on leads, stale-stop, and max-loops`));
 
   let loopIndex = 0;
@@ -61,13 +66,18 @@ export async function startAgent(config) {
       whiteboardSummary: promptWhiteboardSummary,
       lastOutput: prevSummary,
     });
-    const playbookRecommendations = recommendPlaybooks({
+    let playbookRecommendations = recommendPlaybooks({
       loopPlan,
       iterations: whiteboard.iterations,
       whiteboardSummary: promptWhiteboardSummary,
       lastOutput: prevSummary,
       foundFlags: flagCounter.all(),
     });
+    if (isAccessRecoveryPlan(loopPlan)) {
+      playbookRecommendations = playbookRecommendations.filter((item) =>
+        /spring4shell|post-foothold/i.test(item.id),
+      );
+    }
 
     const flagTarget = config.maxFlags ? `${config.flagsNeeded}-${config.maxFlags}` : `${config.flagsNeeded}+`;
     console.log(chalk.yellow(`\n=== loop ${loopIndex}/${config.maxLoops} | flags: ${flagCounter.count()}/${flagTarget} | stale: ${staleLoops}/${config.stopAfterStale} ===`));
@@ -92,6 +102,7 @@ export async function startAgent(config) {
       lastOutput: prevSummary,
     };
 
+    const flagsBeforeRun = new Set(flagCounter.all());
     const result = await runner.run(context, {
       onOutput: (chunk) => {
         const newFlags = streamScanner.scan(chunk);
@@ -111,10 +122,9 @@ export async function startAgent(config) {
     whiteboard.recordIteration(findings);
     prevSummary = findings.summary;
 
-    const beforeFlags = flagCounter.count();
     flagCounter.scan(output);
     for (const f of findings.newFlags) flagCounter.scan(f);
-    const allNewFlags = flagCounter.all().slice(beforeFlags);
+    const allNewFlags = flagCounter.all().filter((flag) => !flagsBeforeRun.has(flag));
 
     if (allNewFlags.length > 0) {
       console.log(chalk.green(`[finding] post-run flags: ${allNewFlags.length}`));
@@ -181,8 +191,55 @@ export async function startAgent(config) {
   };
 }
 
+function prepareAgentWorkspace(config) {
+  mkdirSync(config.artifactDir, { recursive: true });
+  for (const dir of ["scripts", "payloads", "downloads", "notes", "tools", "agent-workspace"]) {
+    mkdirSync(join(config.artifactDir, dir), { recursive: true });
+  }
+  mkdirSync(config.agentWorkDir, { recursive: true });
+
+  const toolCopies = [
+    ["proxy/proxy-client-linux-amd64", "tools/proxy-client-linux-amd64", 0o755],
+    ["proxy/proxy-client-windows-amd64.exe", "tools/proxy-client-windows-amd64.exe", 0o755],
+  ];
+  for (const [from, to, mode] of toolCopies) {
+    const source = join(config.workDir, from);
+    const dest = join(config.artifactDir, to);
+    if (!existsSync(source) || existsSync(dest)) continue;
+    copyFileSync(source, dest);
+    try {
+      chmodSync(dest, mode);
+    } catch {}
+  }
+
+  writeFileSync(join(config.agentWorkDir, "README.md"), [
+    "# Isolated pen-agent workspace",
+    "",
+    "Use this directory and the artifact subdirectories for generated scripts, payloads, downloads, and notes.",
+    "Do not read the repository root, docker topology source, historical runs, or local flag fixture files as evidence.",
+    "Valid flags must come from the authorized target over HTTP, RCE/webshell/SSH/C2, or a target service protocol client.",
+    "",
+    `Artifact dir: ${config.artifactDir}`,
+    `Proxy client (linux): ${join(config.artifactDir, "tools", "proxy-client-linux-amd64")}`,
+    "",
+  ].join("\n"), "utf8");
+}
+
 function buildLoopPlan(loopIndex, state) {
   const foothold = detectFootholdState(state.iterations || []);
+  if (foothold.hasFoothold && foothold.footholdBroken && !foothold.hasActiveAccess) {
+    return {
+      title: `第 ${loopIndex} 轮：入口访问恢复与最小内网路径复核`,
+      goals: [
+        "不要执行内网服务 playbook；当前缺少可用 RCE/C2/SSH 通道，先确认入口访问是否仍可执行命令。",
+        "只验证少量恢复路径：现有 webshell 状态、是否可关闭 AccessLogValve、是否存在备用 webshell、是否配置 callback host；写新 JSP 或修复 webshell 最多尝试 2 次。",
+        "如果恢复了命令执行，立即执行基础枚举并保存路由证据；如果只是间歇执行，也不要阻塞在持久化上，优先用简单短命令从入口节点探测少量高价值内网 HTTP 服务。",
+        "如果完全无法执行命令，停止并明确需要靶场重置、callback host 或授权跳板。",
+        "不要从本机直接扫描内网私网段；只有通过已控入口或授权跳板观察到的内网服务才进入后续 playbook。",
+      ],
+    };
+  }
+
   if (foothold.hasFoothold && !foothold.hasInternalCoverage) {
     return {
       title: `第 ${loopIndex} 轮：已获入口访问后的内网枚举与服务发现`,
@@ -262,8 +319,15 @@ function buildLoopPlan(loopIndex, state) {
   };
 }
 
+function isAccessRecoveryPlan(loopPlan = {}) {
+  return /入口访问恢复|访问恢复|RCE.*恢复|缺少可用 RCE|缺少可用.*通道/i.test([
+    loopPlan.title,
+    ...(loopPlan.goals || []),
+  ].filter(Boolean).join("\n"));
+}
+
 function detectFootholdState(iterations = []) {
-  const text = iterations.map((iter) => [
+  const entries = iterations.map((iter) => [
     iter.summary,
     iter.position,
     ...(iter.flags || []),
@@ -272,15 +336,19 @@ function detectFootholdState(iterations = []) {
     ...(iter.nextSteps || []),
     ...(iter.actions || []),
     ...(iter.toolCalls || []).flatMap((call) => [call.command, call.purpose, call.result, call.impact]),
-  ].flat().filter(Boolean).join("\n")).join("\n");
+  ].flat().filter(Boolean).join("\n"));
+  const text = entries.join("\n");
+  const latestText = entries.at(-1) || "";
 
   const hasFoothold = /webshell|shell\.jsp|反弹\s*shell|命令执行|RCE|whoami|uid=\d+|gid=\d+|hostname|\/flag\.txt|已获得.*(?:shell|访问|权限)|获得.*flag/i.test(text);
+  const footholdBroken = /shell\.jsp.*(?:500|编译错误|损坏|不可用)|webshell.*(?:损坏|不可用|无法恢复)|RCE.*(?:不可用|丢失|无法恢复)|无RCE权限|无法恢复.*RCE|返回500|quote symbol expected/i.test(latestText);
+  const hasActiveAccess = /(?:成功|可用|已获得|控制|root权限|webshell RCE访问).{0,80}(?:RCE|webshell|shell|C2|SSH|命令执行|root权限)|(?:RCE|webshell|shell|C2|SSH|命令执行).{0,80}(?:成功|可用|已获得|控制|root权限)/i.test(latestText) && !footholdBroken;
   const hasRouteEvidence = /ip route|route -n|ip addr|ifconfig|\/etc\/hosts|\/etc\/resolv\.conf|内网|private pivot|pivot|横向|10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[0-1])\.\d+\.\d+|192\.168\.\d+\.\d+/i.test(text);
   const serviceHits = countInternalServiceHits(iterations);
   const hasInternalCoverage = hasRouteEvidence && serviceHits >= 2;
   const hasPostFootholdAttack = /(solr|gitlab|gogs|redis|samba|smbclient|couchdb|proftpd|ftp|minio|struts|ldap|mysql|postgres|mongodb).*(flag|漏洞|利用|RCE|读取|认证|登录)|Playbook 使用[\s\S]{0,120}(solr|gitlab|gogs|redis|samba|couchdb|proftpd|minio|struts)/i.test(text);
 
-  return { hasFoothold, hasInternalCoverage, hasPostFootholdAttack };
+  return { hasFoothold, footholdBroken, hasActiveAccess, hasInternalCoverage, hasPostFootholdAttack };
 }
 
 function countInternalServiceHits(iterations = []) {
