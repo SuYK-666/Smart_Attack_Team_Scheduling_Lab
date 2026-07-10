@@ -1,26 +1,82 @@
 name: sentinel-mesh-range
 
 services:
-  entry01:
+  # Owns the DMZ address and routing privileges.  The vulnerable web process
+  # shares this network namespace but cannot change its routes or firewall.
+  entry01-netns:
     build:
-      context: ./spring-entry
-    container_name: sentinel-entry01
+      context: ./dmz-netns
+    container_name: sentinel-entry01-netns
     hostname: entry01
+    cap_drop:
+      - ALL
     cap_add:
       - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
     environment:
       LAB_ROUTES: "10.92.20.0/24:10.92.10.20 10.92.30.0/24:10.92.10.20"
-    volumes:
-      - ./flags/entry01/flag.txt:/flag.txt:ro
-      - ./spring-entry/entrypoint.sh:/sentinel-entrypoint.sh:ro
-    entrypoint: ["/bin/sh", "/sentinel-entrypoint.sh"]
+      ROUTE_DEVICE: eth0
     networks:
       dmz:
         ipv4_address: 10.92.10.10
     ports:
-      - "18081:8080"
+      - "${ENTRY_BIND_IP:-127.0.0.1}:${ENTRY_PORT:-18081}:80"
     depends_on:
-      - jump01
+      jump01:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /run:rw,nosuid,nodev,noexec,size=8m
+      - /tmp:rw,nosuid,nodev,noexec,size=8m
+    healthcheck:
+      test: ["CMD-SHELL", "ip route show 10.92.20.0/24 | grep -Fq 'via 10.92.10.20' && ip route show 10.92.30.0/24 | grep -Fq 'via 10.92.10.20' && iptables -C OUTPUT -j SENTINEL_DMZ_EGRESS"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  entry01:
+    build:
+      context: ./dmz-httpd
+    container_name: sentinel-entry01
+    hostname: entry01
+    network_mode: "service:entry01-netns"
+    depends_on:
+      entry01-netns:
+        condition: service_healthy
+    volumes:
+      - ./flags/entry01/flag.txt:/flag.txt:ro
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777
+      - /opt/lab-work:rw,nosuid,nodev,size=64m,mode=1777
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 3 http://127.0.0.1/ >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   jump01:
     build:
@@ -40,6 +96,12 @@ services:
         ipv4_address: 10.92.30.254
     ports:
       - "2223:22"
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$(cat /proc/sys/net/ipv4/ip_forward)\" = 1 && nc -z 127.0.0.1 22"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
 
   intranet:
     build:
@@ -194,7 +256,6 @@ services:
     hostname: files01
     volumes:
       - ./flags/files01/flag.txt:/flag.txt:ro
-      - ./flags/files01/flag.txt:/var/ftp/flag.txt:ro
       - ./proftpd/ftp-root:/var/ftp/data:rw
     networks:
       core:
@@ -267,15 +328,18 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >
+        set -eu;
         until mc alias set sentinel http://minio01:9000 minioadmin MinioRoot-Sentinel!; do sleep 3; done;
         mc mb --ignore-existing sentinel/flag;
-        mc cp /seed/flag.txt sentinel/flag/flag.txt;
-        mc anonymous set none sentinel/flag || true;
+        mc cp --overwrite /seed/flag.txt sentinel/flag/flag.txt;
+        mc stat sentinel/flag/flag.txt >/dev/null;
+        mc anonymous set none sentinel/flag;
         echo "seeded s3://flag/flag.txt";
     volumes:
       - ./flags/minio01:/seed:ro
     networks:
       core: {}
+    restart: on-failure
 
 networks:
   dmz:

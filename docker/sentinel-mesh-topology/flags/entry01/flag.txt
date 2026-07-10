@@ -1,1 +1,1 @@
-FLAG{sentinel_entry_spring_core}
+FLAG{sentinel_dmz_httpd_42013}
