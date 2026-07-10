@@ -80,6 +80,7 @@ export interface AssetEdge {
 export interface RunControlState {
   running: boolean;
   active?: RunRecord | null;
+  recoverable?: RecoverableRun | null;
   recent?: RunRecord[];
 }
 
@@ -92,11 +93,25 @@ export interface RunRecord {
   endedAt?: string | null;
   exitCode?: number | null;
   signal?: string | null;
-  status?: "running" | "stopping" | "completed" | "failed";
+  status?: "running" | "stopping" | "completed" | "failed" | "interrupted";
   target?: string;
   flagsFound?: number;
   iterations?: number;
   summary?: string;
+  resumedFrom?: string | null;
+  recoverable?: boolean;
+}
+
+export interface RecoverableRun {
+  recoverable: boolean;
+  phase?: string;
+  reason?: string;
+  target?: string;
+  flagsFound?: number;
+  maxFlags?: number | string | null;
+  iterations?: number;
+  lastUpdatedAt?: string | null;
+  runId?: string | null;
 }
 
 export interface NoteFile {

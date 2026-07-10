@@ -18,7 +18,7 @@ export const useRuntimeStore = defineStore("runtime", {
     flags: { count: 0, flags: [] } as FlagState,
     assets: [] as AssetNode[],
     edges: [] as AssetEdge[],
-    run: { running: false, active: null, recent: [] } as RunControlState,
+    run: { running: false, active: null, recoverable: null, recent: [] } as RunControlState,
     history: [] as RunControlState["recent"],
     selectedRunId: "",
     notes: [] as NoteFile[],
@@ -67,7 +67,7 @@ export const useRuntimeStore = defineStore("runtime", {
         getJson<TeamStatusState>(`/api/teams${suffix}`, { teams: [] }),
         getJson<{ lines: string[] }>(`/api/logs/tail${logSuffix}`, { lines: [] }),
       ]);
-      const run = await getJson<RunControlState>("/api/run", { running: false, active: null, recent: [] });
+      const run = await getJson<RunControlState>("/api/run", { running: false, active: null, recoverable: null, recent: [] });
       const history = await getJson<RunControlState["recent"]>("/api/history", []);
       this.status = status;
       this.state = whiteboard;
@@ -101,8 +101,28 @@ export const useRuntimeStore = defineStore("runtime", {
       }
       this.selectedRunId = "";
       this.activeNote = null;
-      this.run = { running: true, active: data.run, recent: this.run.recent || [] };
+      this.run = { running: true, active: data.run, recoverable: null, recent: this.run.recent || [] };
       this.actionMessage = "任务已启动";
+      await this.refreshAll();
+      return true;
+    },
+    async resumeCurrentRun(payload: Record<string, unknown>) {
+      this.actionError = "";
+      this.actionMessage = "";
+      const res = await fetch("/api/run/resume-current", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        this.actionError = data.error || "恢复失败";
+        return false;
+      }
+      this.selectedRunId = "";
+      this.activeNote = null;
+      this.run = { running: true, active: data.run, recoverable: null, recent: this.run.recent || [] };
+      this.actionMessage = "当前任务已恢复";
       await this.refreshAll();
       return true;
     },

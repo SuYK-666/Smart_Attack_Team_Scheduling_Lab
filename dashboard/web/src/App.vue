@@ -21,6 +21,13 @@ const nav = [
 const latest = computed(() => store.latestIteration);
 const phaseClass = computed(() => `phase-${store.effectivePhase}`);
 const selectedHistoryRun = computed(() => (store.history || []).find((run) => run.id === store.selectedRunId));
+const canResumeCurrent = computed(() => !store.run.running && !store.selectedRunId && Boolean(store.run.recoverable?.recoverable));
+const recoverableSummary = computed(() => {
+  const item = store.run.recoverable;
+  if (!item?.recoverable) return "";
+  const flags = item.maxFlags ? `${item.flagsFound || 0}/${item.maxFlags}` : `${item.flagsFound || 0}`;
+  return `${item.target || "当前任务"} · ${item.iterations || 0} 轮 · flags ${flags} · ${item.phase || "interrupted"}`;
+});
 const successfulAttacks = computed(() => {
   return store.iterations
     .filter((item) => (item.flags || []).length || (item.access || []).length)
@@ -165,6 +172,18 @@ function portFromUrl(input: string) {
 
 async function startRun() {
   await store.startRun({ ...runForm });
+  if (!store.actionError) active.value = "overview";
+}
+
+async function resumeCurrentRun() {
+  await store.resumeCurrentRun({
+    maxLoops: runForm.maxLoops,
+    minLoops: runForm.minLoops,
+    stopAfterStale: runForm.stopAfterStale,
+    model: runForm.model,
+    agent: runForm.agent,
+    attachUrl: runForm.attachUrl,
+  });
   if (!store.actionError) active.value = "overview";
 }
 
@@ -392,10 +411,12 @@ watch(
 
             <div class="form-actions full">
               <button class="primary-button" type="submit" :disabled="store.run.running">启动任务</button>
+              <button class="secondary-button" type="button" :disabled="!canResumeCurrent" @click="resumeCurrentRun()">恢复当前任务</button>
               <button class="secondary-button" type="button" :disabled="!store.run.running" @click="store.stopRun()">停止任务</button>
             </div>
           </form>
 
+          <p v-if="canResumeCurrent" class="form-message ok">可恢复：{{ recoverableSummary }}</p>
           <p v-if="store.actionError" class="form-message error">{{ store.actionError }}</p>
           <p v-if="store.actionMessage" class="form-message ok">{{ store.actionMessage }}</p>
           <pre class="command-preview">{{ commandPreview }}</pre>

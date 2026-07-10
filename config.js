@@ -26,6 +26,7 @@ function parseArgs() {
     callbackHost: process.env.PEN_AGENT_CALLBACK_HOST || null,
     scopeMode: "entry-port",
     allowPrivatePivot: true,
+    resume: false,
     flagPattern: /(?<![A-Za-z0-9_])(?=[A-Za-z0-9_]{2,32}\{)(?=[A-Za-z0-9_]*(?:ctf|flag))[A-Za-z0-9_]+\{[^}\s]{3,128}\}/gi,
   };
 
@@ -100,6 +101,9 @@ function parseArgs() {
       case "--status":
         config.showStatus = true;
         break;
+      case "--resume":
+        config.resume = true;
+        break;
       case "-h":
       case "--help":
         printHelp();
@@ -140,6 +144,7 @@ Options:
   --callback-host <host> Host/IP reachable from target for reverse shell or C2 (env: PEN_AGENT_CALLBACK_HOST)
   --scope <mode>      Public target scope: entry-port, public-host, open (default: entry-port)
   --no-private-pivot  Disallow private/internal pivot targets discovered through the entry
+  --resume            Continue from existing .pen-agent/artifacts state instead of cleaning it
   --artifact-dir <path> Directory for generated scripts/payloads/artifacts (default: ./artifacts)
   --pattern <regex>   Custom flag regex pattern
   --no-auto           Disable auto-approve permissions
@@ -193,6 +198,7 @@ function dump(config) {
   console.log(`  Callback host:   ${config.callbackHost || "not set"}`);
   console.log(`  Scope:           ${config.scopeMode}`);
   console.log(`  Private pivot:   ${config.allowPrivatePivot}`);
+  console.log(`  Resume mode:     ${config.resume}`);
   console.log(`  Model:           ${config.opencodeModel || "default"}`);
   console.log(`  Agent:           ${config.opencodeAgent || "default"}`);
   console.log(`  Auto approve:    ${config.opencodeAuto}`);

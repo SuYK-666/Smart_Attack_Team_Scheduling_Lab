@@ -29,6 +29,7 @@ const server = createServer((req, res) => {
     if (url.pathname === "/api/run" && req.method === "GET") return json(res, runStatus());
     if (url.pathname === "/api/run" && req.method === "POST") return readBody(req).then((body) => startRun(body, res)).catch((err) => json(res, { error: err.message }, 400));
     if (url.pathname === "/api/run/stop" && req.method === "POST") return stopRun(res);
+    if (url.pathname === "/api/run/resume-current" && req.method === "POST") return readBody(req).then((body) => resumeCurrentRun(body, res)).catch((err) => json(res, { error: err.message }, 400));
     if (url.pathname === "/api/history") return json(res, listHistory());
     if (url.pathname === "/api/state") return json(res, readState(pathsForRun(url.searchParams.get("runId"))));
     if (url.pathname === "/api/status") {
@@ -92,6 +93,7 @@ function runStatus() {
   return {
     running: Boolean(activeRun),
     active: activeRun ? publicRun(activeRun) : null,
+    recoverable: activeRun ? null : currentRecoverableRun(),
     recent: listHistory().slice(0, 8),
   };
 }
@@ -109,6 +111,8 @@ function publicRun(run) {
     signal: run.signal || null,
     status: run.status,
     target: run.target,
+    resumedFrom: run.resumedFrom,
+    recoverable: run.recoverable,
   };
 }
 
@@ -155,6 +159,31 @@ function startRun(body, res) {
   archiveCurrentSnapshot();
 
   const { args, target } = buildAgentArgs(body || {});
+  const run = launchRun(args, target, { status: "running" });
+  return json(res, { ok: true, run: publicRun(run) }, 201);
+}
+
+function resumeCurrentRun(body, res) {
+  if (activeRun) return json(res, { error: "agent is already running", run: publicRun(activeRun) }, 409);
+  const recoverable = currentRecoverableRun();
+  if (!recoverable?.recoverable) return json(res, { error: "no recoverable current run" }, 409);
+
+  const status = readJson(join(penDir, "status.json"), {});
+  const state = readState(pathsForRun());
+  let args = Array.isArray(status.args) && status.args.length ? [...status.args] : buildArgsFromSnapshot(state, status);
+  args = applyResumeOverrides(args, body || {});
+  if (!args.includes("--resume")) args.push("--resume");
+
+  const target = recoverable.target || targetFromArgs(args) || state._config?.target || "";
+  const run = launchRun(args, target, {
+    status: "running",
+    resumedFrom: status.runId || status.resumedFrom || "current",
+    resumeMode: "current",
+  });
+  return json(res, { ok: true, run: publicRun(run) }, 201);
+}
+
+function launchRun(args, target, options = {}) {
   const child = spawn(process.execPath, args, {
     cwd: rootDir,
     stdio: ["ignore", "inherit", "inherit"],
@@ -170,14 +199,33 @@ function startRun(body, res) {
     target,
     child,
     startedAt: new Date().toISOString(),
-    status: "running",
+    status: options.status || "running",
+    resumedFrom: options.resumedFrom || null,
   };
   activeRun = run;
+  writeCurrentStatus({
+    phase: "running",
+    recoverable: false,
+    runId: run.id,
+    pid: run.pid,
+    args,
+    target,
+    startedAt: run.startedAt,
+    resumedFrom: run.resumedFrom,
+    resumeMode: options.resumeMode || null,
+  });
   child.on("exit", (code, signal) => {
-    run.status = code === 0 ? "completed" : "failed";
+    run.status = signal ? "interrupted" : code === 0 ? "completed" : "failed";
     run.exitCode = code;
     run.signal = signal;
     run.endedAt = new Date().toISOString();
+    writeCurrentStatus({
+      phase: run.status,
+      recoverable: Boolean(signal || code !== 0),
+      endedAt: run.endedAt,
+      exitCode: code,
+      signal,
+    });
     archiveRunSnapshot(run);
     upsertHistory(publicRun(run));
     if (activeRun?.id === run.id) activeRun = null;
@@ -186,18 +234,30 @@ function startRun(body, res) {
     run.status = "failed";
     run.error = err.message;
     run.endedAt = new Date().toISOString();
+    writeCurrentStatus({
+      phase: "failed",
+      recoverable: true,
+      endedAt: run.endedAt,
+      error: err.message,
+    });
     archiveRunSnapshot(run);
     upsertHistory(publicRun(run));
     if (activeRun?.id === run.id) activeRun = null;
   });
-
-  return json(res, { ok: true, run: publicRun(run) }, 201);
+  return run;
 }
 
 function stopRun(res) {
   if (!activeRun) return json(res, { ok: true, stopped: false });
   const run = activeRun;
   run.status = "stopping";
+  run.recoverable = true;
+  writeCurrentStatus({
+    phase: "stopping",
+    recoverable: true,
+    stoppedAt: new Date().toISOString(),
+    message: "User requested stop; run can be resumed.",
+  });
   run.child.kill("SIGTERM");
   setTimeout(() => {
     if (activeRun?.id === run.id) run.child.kill("SIGKILL");
@@ -226,6 +286,66 @@ function buildAgentArgs(body) {
   if (body.apiKey) addStringArg(args, "--key", body.apiKey, 512);
 
   return { args, target: `${parsed.host}:${parsed.port}` };
+}
+
+function buildArgsFromSnapshot(state = {}, status = {}) {
+  const target = parseTarget(status.target || state._config?.target || "127.0.0.1:80");
+  const args = ["index.js", "--target", target.host, "--port", String(target.port)];
+  addArgValue(args, "--flags", state._flagsNeeded || 1);
+  if (state._config?.maxFlags && state._config.maxFlags !== "unlimited") addArgValue(args, "--max-flags", state._config.maxFlags);
+  addArgValue(args, "--max-loops", 8);
+  addArgValue(args, "--min-loops", 1);
+  addArgValue(args, "--stop-after-stale", 2);
+  addArgValue(args, "--proxy-port", 9999);
+  if (state._config?.scopeMode) addArgValue(args, "--scope", state._config.scopeMode);
+  if (state._config?.allowPrivatePivot === false) args.push("--no-private-pivot");
+  return args;
+}
+
+function applyResumeOverrides(args, body = {}) {
+  const next = [...args];
+  replaceNumberArg(next, "--max-loops", body.maxLoops, 1, 500);
+  replaceNumberArg(next, "--min-loops", body.minLoops, 1, 500);
+  replaceNumberArg(next, "--stop-after-stale", body.stopAfterStale, 1, 100);
+  replaceStringArg(next, "--model", body.model, 160);
+  replaceStringArg(next, "--agent", body.agent, 80);
+  replaceStringArg(next, "--attach", body.attachUrl, 240);
+  return next;
+}
+
+function addArgValue(args, name, value) {
+  if (value === undefined || value === null || value === "") return;
+  args.push(name, String(value));
+}
+
+function replaceNumberArg(args, name, value, min, max) {
+  if (value === undefined || value === null || value === "") return;
+  const num = Number(value);
+  if (!Number.isFinite(num) || num < min || num > max) throw new Error(`${name} is out of range`);
+  replaceArg(args, name, String(Math.trunc(num)));
+}
+
+function replaceStringArg(args, name, value, maxLength) {
+  const text = String(value || "").trim();
+  if (!text) return;
+  if (text.length > maxLength) throw new Error(`${name} is too long`);
+  if (/[\u0000-\u001f]/.test(text)) throw new Error(`${name} contains invalid control characters`);
+  replaceArg(args, name, text);
+}
+
+function replaceArg(args, name, value) {
+  const index = args.indexOf(name);
+  if (index >= 0) {
+    args[index + 1] = value;
+    return;
+  }
+  args.push(name, value);
+}
+
+function targetFromArgs(args = []) {
+  const host = args[args.indexOf("--target") + 1];
+  const port = args[args.indexOf("--port") + 1];
+  return host && port ? `${host}:${port}` : "";
 }
 
 function parseTarget(input) {
@@ -305,6 +425,34 @@ function readStatus(paths = pathsForRun()) {
   };
 }
 
+function currentRecoverableRun() {
+  const status = readJson(join(penDir, "status.json"), {});
+  const state = readState(pathsForRun());
+  const rawFlags = readJson(join(artifactDir, "flags.json"), { count: 0, flags: [] });
+  const flags = normalizeFlagState(rawFlags, state, pathsForRun());
+  const iterations = state.iteration || state.iterations?.length || 0;
+  const hasState = iterations > 0 || flags.count > 0 || existsSync(join(penDir, "stream.log"));
+  if (!hasState) return null;
+
+  const phase = String(status.phase || "idle");
+  const recoverable = Boolean(status.recoverable)
+    || /^(failed|interrupted|stopping)$/i.test(phase)
+    || (phase === "completed" && state._config?.maxFlags && flags.count < Number(state._config.maxFlags));
+  if (!recoverable) return null;
+
+  return {
+    recoverable: true,
+    phase,
+    reason: status.message || (phase === "completed" ? "completed before max flags" : "stopped or interrupted"),
+    target: status.target || state._config?.target || flags.target || "",
+    flagsFound: flags.count || 0,
+    maxFlags: state._config?.maxFlags || rawFlags.maxFlags || null,
+    iterations,
+    lastUpdatedAt: status.time || status.endedAt || statTime(join(penDir, "stream.log")) || null,
+    runId: status.runId || null,
+  };
+}
+
 function readJson(path, fallback) {
   try {
     if (!existsSync(path)) return fallback;
@@ -312,6 +460,17 @@ function readJson(path, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function writeCurrentStatus(data) {
+  const statusPath = join(penDir, "status.json");
+  const previous = readJson(statusPath, {});
+  mkdirSync(penDir, { recursive: true });
+  writeFileSync(statusPath, JSON.stringify({
+    ...previous,
+    ...data,
+    time: data.time || new Date().toISOString(),
+  }, null, 2), "utf-8");
 }
 
 function listHistory() {

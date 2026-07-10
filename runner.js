@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, appendFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import os from "node:os";
 import chalk from "chalk";
@@ -30,7 +30,7 @@ const WINDOWS_FALLBACK_PATHS = [
 export class Runner {
   constructor(config) {
     this.config = config;
-    this.runCount = 0;
+    this.runCount = config.resumeStartIteration || 0;
   }
 
   async run(context, hooks = {}) {
@@ -157,7 +157,11 @@ export class Runner {
 
   _status(path, data) {
     try {
-      writeFileSync(path, JSON.stringify(data, null, 2), "utf8");
+      let previous = {};
+      try {
+        if (existsSync(path)) previous = JSON.parse(readFileSync(path, "utf8"));
+      } catch {}
+      writeFileSync(path, JSON.stringify({ ...previous, ...data }, null, 2), "utf8");
     } catch {}
   }
 

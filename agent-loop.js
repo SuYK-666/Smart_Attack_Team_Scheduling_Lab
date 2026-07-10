@@ -1,5 +1,5 @@
 import chalk from "chalk";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -20,8 +20,10 @@ export async function startAgent(config) {
   const flagCounter = new FlagCounter(config.flagPattern);
   const flagStore = new FlagStore(config.artifactDir, config);
   const proxy = new ProxyServer(config.proxyPort);
+  const resumedFlags = config.resume ? loadResumeFlags(config, whiteboard) : [];
+  for (const flag of resumedFlags) flagCounter.scan(flag);
 
-  flagStore.write([]);
+  flagStore.write(flagCounter.all());
   whiteboard.setConfig("target", config.target);
   whiteboard.setConfig("artifactDir", config.artifactDir);
   whiteboard.setConfig("flagJsonPath", flagStore.jsonPath);
@@ -29,7 +31,7 @@ export async function startAgent(config) {
   whiteboard.setConfig("maxFlags", config.maxFlags ?? "unlimited");
   whiteboard.setConfig("scopeMode", config.scopeMode);
   whiteboard.setConfig("allowPrivatePivot", config.allowPrivatePivot);
-  whiteboard.setFlagCount(0, config.flagsNeeded);
+  whiteboard.setFlagCount(flagCounter.count(), config.flagsNeeded);
 
   await proxy.start().catch((e) => {
     console.error(chalk.red(`[agent] proxy server failed: ${e.message}`));
@@ -39,8 +41,13 @@ export async function startAgent(config) {
   console.log(chalk.green(`[system] artifact dir: ${config.artifactDir}`));
   console.log(chalk.green(`[system] isolated agent work dir: ${config.agentWorkDir}`));
   console.log(chalk.green(`[system] estimated max flags: ${config.maxFlags ?? "unknown"}; stop still depends on leads, stale-stop, and max-loops`));
+  if (config.resume) {
+    console.log(chalk.green(`[system] resume mode: loaded ${flagCounter.count()} existing flag(s), ${whiteboard.iterations.length} prior iteration(s)`));
+  }
 
-  let loopIndex = 0;
+  const startingLoopIndex = config.resume ? (whiteboard.iteration || whiteboard.iterations.length || 0) : 0;
+  config.resumeStartIteration = startingLoopIndex;
+  let loopIndex = startingLoopIndex;
   let staleLoops = 0;
   let prevSummary = null;
   let continueBeyondMaxFlags = false;
@@ -228,6 +235,26 @@ function prepareAgentWorkspace(config) {
     `Proxy client (linux): ${join(config.artifactDir, "tools", "proxy-client-linux-amd64")}`,
     "",
   ].join("\n"), "utf8");
+}
+
+function loadResumeFlags(config, whiteboard) {
+  const flags = [];
+  try {
+    const raw = JSON.parse(readFileSync(join(config.artifactDir, "flags.json"), "utf8"));
+    for (const item of raw.flags || []) {
+      if (typeof item === "string") flags.push(item);
+      else if (item?.value) flags.push(item.value);
+      else if (item?.flag) flags.push(item.flag);
+    }
+  } catch {}
+
+  try {
+    const text = readFileSync(join(config.artifactDir, "flags.txt"), "utf8");
+    flags.push(...text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+  } catch {}
+
+  flags.push(...whiteboard.allFlags());
+  return [...new Set(flags)];
 }
 
 function buildLoopPlan(loopIndex, state) {
