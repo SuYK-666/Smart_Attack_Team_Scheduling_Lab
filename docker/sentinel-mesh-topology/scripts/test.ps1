@@ -7,7 +7,7 @@ Write-Host '== Compose status =='
 docker compose ps
 
 Write-Host "`n== Published entry checks =="
-$entry = Invoke-WebRequest -Uri 'http://127.0.0.1:18080/' -UseBasicParsing
+$entry = Invoke-WebRequest -Uri 'http://127.0.0.1:18081/' -UseBasicParsing
 Write-Host "entry01 HTTP status: $($entry.StatusCode)"
 
 Write-Host "`n== Network reachability from dev01 =="

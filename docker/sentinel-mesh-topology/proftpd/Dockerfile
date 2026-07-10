@@ -1,10 +1,9 @@
-FROM debian:bookworm-slim
+FROM vulhub/proftpd:1.3.5
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends proftpd-basic proftpd-mod-crypto \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /var/ftp/data /run/proftpd \
-    && useradd -r -d /var/ftp -s /usr/sbin/nologin ftpuser \
+# CVE-2015-3306 is a ProFTPD 1.3.5 mod_copy issue.  Do not replace this
+# image with a distribution package: supported distributions ship a fixed
+# version and would turn files01 into a non-vulnerable FTP service.
+RUN mkdir -p /var/ftp/data /run/proftpd \
     && chown -R ftpuser:ftpuser /var/ftp
 
 COPY proftpd.conf /etc/proftpd/proftpd.conf
