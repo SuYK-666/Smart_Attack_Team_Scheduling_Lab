@@ -149,6 +149,26 @@ export const useRuntimeStore = defineStore("runtime", {
     async showCurrentRun() {
       await this.selectRun("");
     },
+    async deleteRun(runId: string) {
+      const id = String(runId || "").trim();
+      if (!id) return false;
+      this.actionError = "";
+      this.actionMessage = "";
+      const res = await fetch(`/api/history?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        this.actionError = data.error || "删除历史失败";
+        return false;
+      }
+      if (this.selectedRunId === id) {
+        this.selectedRunId = "";
+        this.activeNote = null;
+      }
+      this.history = data.history || (this.history || []).filter((run) => run.id !== id);
+      this.actionMessage = data.deleted ? "历史记录已删除" : "历史记录不存在或已删除";
+      await this.refreshAll();
+      return true;
+    },
     connectEvents() {
       const events = new EventSource("/api/events");
       events.addEventListener("update", (event) => {

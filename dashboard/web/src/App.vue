@@ -234,6 +234,12 @@ async function openHistoryRun(runId: string) {
   active.value = "overview";
 }
 
+async function deleteHistoryRun(runId: string, target = "") {
+  const label = target || runId;
+  if (!window.confirm(`删除历史记录 ${label}？`)) return;
+  await store.deleteRun(runId);
+}
+
 async function showCurrentRun() {
   await store.showCurrentRun();
   active.value = "overview";
@@ -330,9 +336,9 @@ watch(
   <div class="shell">
     <aside class="sidebar">
       <div class="brand">
-        <span class="brand-mark">PA</span>
+        <span class="brand-mark">BP</span>
         <div>
-          <strong>pen-agent</strong>
+          <strong>BreachPilot-Agents</strong>
           <small>运行态展示</small>
         </div>
       </div>
@@ -490,9 +496,12 @@ watch(
               :class="{ active: store.selectedRunId === run.id }"
               @click="openHistoryRun(run.id)"
             >
-              <div>
-                <strong>{{ run.target || "unknown target" }}</strong>
-                <span>{{ run.status || "archived" }} · {{ run.flagsFound || 0 }} flags · {{ run.iterations || 0 }} 轮</span>
+              <div class="history-run-main">
+                <div>
+                  <strong>{{ run.target || "unknown target" }}</strong>
+                  <span>{{ run.status || "archived" }} · {{ run.flagsFound || 0 }} flags · {{ run.iterations || 0 }} 轮</span>
+                </div>
+                <button class="history-delete-button" type="button" title="删除历史记录" @click.stop="deleteHistoryRun(run.id, run.target || run.id)">删除</button>
               </div>
               <small>{{ run.startedAt ? new Date(run.startedAt).toLocaleString() : run.id }}</small>
               <p v-if="run.summary">{{ run.summary }}</p>

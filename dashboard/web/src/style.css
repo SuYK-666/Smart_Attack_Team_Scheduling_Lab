@@ -419,6 +419,29 @@ button:disabled {
   box-shadow: inset 3px 0 0 #2563eb;
 }
 
+.history-run-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+}
+
+.history-delete-button {
+  border: 1px solid rgba(220, 38, 38, 0.22);
+  border-radius: 6px;
+  padding: 4px 7px;
+  background: rgba(254, 242, 242, 0.76);
+  color: #b91c1c;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.history-delete-button:hover {
+  border-color: rgba(220, 38, 38, 0.42);
+  background: rgba(254, 226, 226, 0.9);
+}
+
 .history-runs li.empty-history {
   cursor: default;
   transform: none;

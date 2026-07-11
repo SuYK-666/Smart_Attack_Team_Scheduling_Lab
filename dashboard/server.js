@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { cpSync, createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,7 +30,8 @@ const server = createServer((req, res) => {
     if (url.pathname === "/api/run" && req.method === "POST") return readBody(req).then((body) => startRun(body, res)).catch((err) => json(res, { error: err.message }, 400));
     if (url.pathname === "/api/run/stop" && req.method === "POST") return stopRun(res);
     if (url.pathname === "/api/run/resume-current" && req.method === "POST") return readBody(req).then((body) => resumeCurrentRun(body, res)).catch((err) => json(res, { error: err.message }, 400));
-    if (url.pathname === "/api/history") return json(res, listHistory());
+    if (url.pathname === "/api/history" && req.method === "GET") return json(res, listHistory());
+    if (url.pathname === "/api/history" && req.method === "DELETE") return deleteHistoryRun(url.searchParams.get("id") || "", res);
     if (url.pathname === "/api/state") return json(res, readState(pathsForRun(url.searchParams.get("runId"))));
     if (url.pathname === "/api/status") {
       const paths = pathsForRun(url.searchParams.get("runId"));
@@ -477,6 +478,23 @@ function listHistory() {
   return readHistoryIndex()
     .sort((a, b) => String(b.startedAt || b.id).localeCompare(String(a.startedAt || a.id)))
     .map((run) => ({ ...run, command: run.command || (run.args ? `node ${maskArgs(run.args).join(" ")}` : "") }));
+}
+
+function deleteHistoryRun(id, res) {
+  const cleanId = String(id || "").trim();
+  if (!cleanId || cleanId === "current" || cleanId.includes("/") || cleanId.includes("\\")) {
+    return json(res, { error: "invalid history id" }, 400);
+  }
+  const rows = readHistoryIndex();
+  const nextRows = rows.filter((run) => run.id !== cleanId);
+  const existed = nextRows.length !== rows.length || existsSync(join(historyDir, cleanId));
+  writeHistoryIndex(nextRows);
+  try {
+    rmSync(join(historyDir, cleanId), { recursive: true, force: true });
+  } catch (e) {
+    return json(res, { error: `failed to delete history snapshot: ${e.message}` }, 500);
+  }
+  return json(res, { ok: true, deleted: existed, id: cleanId, history: listHistory() });
 }
 
 function readHistoryIndex() {
