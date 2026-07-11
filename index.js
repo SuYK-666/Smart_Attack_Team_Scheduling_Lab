@@ -31,6 +31,7 @@ async function main() {
   if (config.resume) {
     console.log(chalk.gray("[agent] resume mode: preserving existing .pen-agent and artifacts"));
   }
+  mkdirSync(penDir, { recursive: true });
   mkdirSync(config.artifactDir, { recursive: true });
   mkdirSync(join(config.artifactDir, "scripts"), { recursive: true });
   mkdirSync(join(config.artifactDir, "payloads"), { recursive: true });

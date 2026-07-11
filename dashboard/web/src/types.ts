@@ -25,6 +25,63 @@ export interface FindingIteration {
   position?: string;
   access?: string[];
   intel?: string[];
+  topology?: {
+    networks?: TopologyNetwork[];
+    hosts?: TopologyHost[];
+    services?: TopologyService[];
+    routes?: TopologyRoute[];
+  };
+  flagEvidence?: FlagEvidenceRecord[];
+}
+
+export interface TopologyNetwork {
+  id?: string;
+  cidr?: string;
+  name?: string;
+  evidence?: string;
+  confidence?: string;
+}
+
+export interface TopologyHost {
+  id?: string;
+  hostname?: string;
+  addresses?: string[];
+  networkIds?: string[];
+  role?: string;
+  evidence?: string;
+  confidence?: string;
+}
+
+export interface TopologyService {
+  id?: string;
+  hostId?: string;
+  address?: string;
+  port?: number;
+  name?: string;
+  version?: string;
+  evidence?: string;
+  confidence?: string;
+}
+
+export interface TopologyRoute {
+  from?: string;
+  to?: string;
+  via?: string;
+  evidence?: string;
+  confidence?: string;
+}
+
+export interface FlagEvidenceRecord {
+  value?: string;
+  flag?: string;
+  hostId?: string;
+  serviceId?: string;
+  path?: string;
+  method?: string;
+  via?: string[];
+  command?: string;
+  evidence?: string;
+  confidence?: string;
 }
 
 export interface WhiteboardState {
@@ -42,8 +99,12 @@ export interface FlagRecord {
   evidence?: {
     iter?: number | null;
     method?: string;
+    exploitSummary?: string;
     summary?: string;
     command?: string;
+    hostId?: string;
+    serviceId?: string;
+    confidence?: string;
   };
 }
 
@@ -58,9 +119,19 @@ export interface FlagState {
 export interface AssetNode {
   id: string;
   name: string;
+  kind?: "entry" | "host" | "service";
+  host?: string;
+  port?: number;
+  serviceName?: string;
   inferredZone?: string;
+  role?: string;
+  addresses?: string[];
+  networkIds?: string[];
+  evidence?: string;
+  confidence?: string;
   status?: string;
-  services?: Array<{ port?: number; name?: string }>;
+  services?: Array<{ port?: number; name?: string; version?: string; evidence?: string; confidence?: string }>;
+  flags?: Array<{ value?: string; method?: string; iter?: number; path?: string; command?: string; evidence?: string; confidence?: string }>;
   firstSeenIter?: number;
   lastSeenIter?: number;
   discovered?: boolean;
@@ -75,6 +146,12 @@ export interface AssetEdge {
   type: string;
   iter?: number;
   evidence?: string;
+}
+
+export interface AssetGraph {
+  nodes: AssetNode[];
+  edges: AssetEdge[];
+  networks?: TopologyNetwork[];
 }
 
 export interface RunControlState {

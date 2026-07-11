@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import type { AssetEdge, AssetNode, FlagState, NoteContent, NoteFile, RunControlState, RuntimeStatus, TeamStatusState, WhiteboardState } from "../types";
+import type { AssetEdge, AssetGraph, AssetNode, FlagState, NoteContent, NoteFile, RunControlState, RuntimeStatus, TeamStatusState, TopologyNetwork, WhiteboardState } from "../types";
 
 async function getJson<T>(url: string, fallback: T): Promise<T> {
   try {
@@ -18,6 +18,7 @@ export const useRuntimeStore = defineStore("runtime", {
     flags: { count: 0, flags: [] } as FlagState,
     assets: [] as AssetNode[],
     edges: [] as AssetEdge[],
+    networks: [] as TopologyNetwork[],
     run: { running: false, active: null, recoverable: null, recent: [] } as RunControlState,
     history: [] as RunControlState["recent"],
     selectedRunId: "",
@@ -62,7 +63,7 @@ export const useRuntimeStore = defineStore("runtime", {
         getJson<RuntimeStatus>(`/api/status${suffix}`, { phase: "idle" }),
         getJson<WhiteboardState>(`/api/state${suffix}`, { iterations: [] }),
         getJson<FlagState>(`/api/flags${suffix}`, { count: 0, flags: [] }),
-        getJson<{ nodes: AssetNode[]; edges: AssetEdge[] }>(`/api/asset-graph${suffix}`, { nodes: [], edges: [] }),
+        getJson<AssetGraph>(`/api/asset-graph${suffix}`, { nodes: [], edges: [], networks: [] }),
         getJson<NoteFile[]>(`/api/notes${suffix}`, []),
         getJson<TeamStatusState>(`/api/teams${suffix}`, { teams: [] }),
         getJson<{ lines: string[] }>(`/api/logs/tail${logSuffix}`, { lines: [] }),
@@ -74,6 +75,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.flags = flags;
       this.assets = graph.nodes;
       this.edges = graph.edges;
+      this.networks = graph.networks || [];
       this.notes = notes;
       this.teams = teams;
       this.run = run;
@@ -163,6 +165,7 @@ export const useRuntimeStore = defineStore("runtime", {
         this.teams = data.teams || this.teams;
         this.assets = data.graph?.nodes || [];
         this.edges = data.graph?.edges || [];
+        this.networks = data.graph?.networks || [];
         this.logLines = data.logLines || [];
         this.lastRefresh = new Date().toLocaleTimeString();
       });

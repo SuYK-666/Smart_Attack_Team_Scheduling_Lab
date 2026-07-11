@@ -60,45 +60,87 @@ const attackMilestones = computed(() => {
   }));
 });
 const flagSources = computed(() => store.flags.flags || []);
+const zoneOrder = ["external-entry", "dmz", "routing", "office", "core", "internal", "external", "unknown"];
+const zoneLabels: Record<string, string> = {
+  "external-entry": "External",
+  dmz: "DMZ",
+  routing: "Routing",
+  office: "Office",
+  core: "Core",
+  internal: "Internal",
+  external: "External",
+  unknown: "Unknown",
+};
 const topologyNodes = computed(() => {
-  const nodes = store.assets.slice(0, 40);
-  const groups = [
-    nodes.filter((node) => node.inferredZone === "external-entry" || node.status === "entry"),
-    nodes.filter((node) => node.inferredZone !== "external-entry" && node.status !== "entry"),
-  ].filter((group) => group.length);
-  const width = 980;
-  const left = 132;
-  const usableWidth = width - left * 2;
-  const rowGap = 108;
-  const groupGap = 64;
-  let y = 66;
+  const nodes = store.assets.filter((node) => node.kind !== "service").slice(0, 80);
+  const width = 820;
+  const marginX = 18;
+  const laneGap = 10;
+  const nodeWidth = 106;
+  const nodeHeight = 58;
+  const laneHeaderHeight = 58;
+  const nodeGap = 10;
+  const lanes = zoneOrder
+    .map((zone) => ({ zone, nodes: nodes.filter((node) => (node.inferredZone || "unknown") === zone) }))
+    .filter((lane) => lane.nodes.length);
+  const trackWidth = lanes.length <= 1
+    ? width - marginX * 2
+    : (width - marginX * 2 - laneGap * (lanes.length - 1)) / lanes.length;
 
-  return groups.flatMap((group, groupIndex) => {
-    const maxPerRow = groupIndex === 0 ? 3 : groupIndex === 1 ? 5 : 6;
-    const rows = Math.ceil(group.length / maxPerRow);
-    const positioned = group.map((node, index) => {
-      const row = Math.floor(index / maxPerRow);
-      const rowStart = row * maxPerRow;
-      const rowLength = Math.min(maxPerRow, group.length - rowStart);
-      const col = index - rowStart;
-      const x = rowLength === 1
-        ? width / 2
-        : left + col * (usableWidth / Math.max(1, rowLength - 1));
+  return lanes.flatMap((lane, laneIndex) => {
+    const x = lanes.length === 1
+      ? width / 2
+      : marginX + laneIndex * (trackWidth + laneGap) + trackWidth / 2;
+    return lane.nodes.map((node, index) => {
+      const primaryAddress = node.addresses?.[0] || (node.id === node.name ? "" : node.id);
+      const services = (node.services || []).slice(0, 3).map((svc) => `${svc.name || "svc"}:${svc.port || "?"}`).join("  ");
+      const flags = (node.flags || []).slice(0, 2);
       return {
         ...node,
         x,
-        y: y + row * rowGap,
-        addressLabel: node.id === node.name ? "" : node.id,
-        className: node.flagFound ? "flag" : node.accessGained ? "access" : node.status === "service" ? "service" : node.status === "entry" ? "entry" : "host",
+        y: laneHeaderHeight + nodeHeight / 2 + index * (nodeHeight + nodeGap),
+        width: Math.min(nodeWidth, trackWidth - 8),
+        height: nodeHeight,
+        laneWidth: trackWidth,
+        zoneLabel: zoneLabels[lane.zone] || lane.zone,
+        addressLabel: primaryAddress,
+        servicesLabel: services,
+        flagLabel: flags.map((flag) => flag.method || "flag").join(" / "),
+        className: [
+          node.kind || (node.status === "entry" ? "entry" : "host"),
+          node.status === "gateway" ? "gateway" : "",
+          node.accessGained ? "access" : "",
+          node.flagFound ? "flag" : "",
+        ].filter(Boolean).join(" "),
       };
     });
-    y += rows * rowGap + groupGap;
-    return positioned;
   });
 });
+const topologyLanes = computed(() => {
+  const laneByZone = new Map<string, { zone: string; label: string; x: number; width: number; height: number }>();
+  for (const node of topologyNodes.value) {
+    const zone = node.inferredZone || "unknown";
+    const existing = laneByZone.get(zone);
+    if (!existing) {
+      laneByZone.set(zone, {
+        zone,
+        label: node.zoneLabel || zoneLabels[zone] || zone,
+        x: (node.x || 0) - (node.laneWidth || node.width || 106) / 2 + 2,
+        width: Math.max((node.width || 106) + 8, (node.laneWidth || 106) - 4),
+        height: 0,
+      });
+    }
+    const lane = laneByZone.get(zone);
+    if (lane) lane.height = Math.max(lane.height, (node.y || 0) + (node.height || 58) + 18);
+  }
+  return [...laneByZone.values()].map((lane) => ({
+    ...lane,
+    height: Math.max(132, lane.height),
+  }));
+});
 const topologyHeight = computed(() => {
-  const maxY = Math.max(0, ...topologyNodes.value.map((node) => node.y || 0));
-  return Math.max(620, Math.ceil(maxY + 96));
+  const maxY = Math.max(0, ...topologyNodes.value.map((node) => (node.y || 0) + (node.height || 58)));
+  return Math.max(240, Math.ceil(maxY + 32));
 });
 const topologyNodeMap = computed(() => new Map(topologyNodes.value.map((node) => [node.id, node])));
 const topologyEdges = computed(() => store.edges
@@ -111,10 +153,10 @@ const topologyEdges = computed(() => store.edges
   .slice(0, 120));
 const renderedNote = computed(() => renderMarkdown(store.activeNote?.content || ""));
 const runForm = reactive({
-  targetUrl: "http://127.0.0.1:18080",
+  targetUrl: "http://47.238.225.21:18081/",
   flagsNeeded: 1,
-  maxFlags: 1,
-  maxLoops: 8,
+  maxFlags: 6,
+  maxLoops: 10,
   minLoops: 1,
   stopAfterStale: 2,
   proxyPort: 9999,
@@ -568,12 +610,17 @@ watch(
       <section v-else-if="active === 'assets'" class="panel">
         <h2>agent 探测资产</h2>
         <div class="topology-panel">
-          <svg :viewBox="`0 0 980 ${topologyHeight}`" :style="{ aspectRatio: `980 / ${topologyHeight}` }" role="img" aria-label="资产拓扑图">
+          <svg :viewBox="`0 0 820 ${topologyHeight}`" :style="{ aspectRatio: `820 / ${topologyHeight}` }" role="img" aria-label="资产拓扑图">
             <defs>
               <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
                 <path d="M 0 0 L 10 5 L 0 10 z"></path>
               </marker>
             </defs>
+            <g v-for="lane in topologyLanes" :key="lane.zone" class="topology-lane">
+              <rect :x="lane.x" y="36" :width="lane.width" :height="lane.height" rx="6"></rect>
+              <rect class="topology-lane-label-bg" :x="lane.x" y="10" :width="lane.width" height="22" rx="5"></rect>
+              <text :x="lane.x + lane.width / 2" y="25">{{ lane.label }}</text>
+            </g>
             <line
               v-for="edge in topologyEdges"
               :key="edge.key"
@@ -584,16 +631,18 @@ watch(
               :y2="edge.toNode?.y"
             />
             <g v-for="node in topologyNodes" :key="node.id" class="topology-node" :class="node.className" :transform="`translate(${node.x}, ${node.y})`">
-              <circle r="18"></circle>
-              <text y="32">{{ node.name.length > 18 ? `${node.name.slice(0, 18)}...` : node.name }}</text>
-              <text v-if="node.addressLabel" y="46" class="node-address">{{ node.addressLabel.length > 22 ? `${node.addressLabel.slice(0, 22)}...` : node.addressLabel }}</text>
-              <text :y="node.addressLabel ? 60 : 46" class="node-subtitle">{{ node.inferredZone || node.status || "node" }}</text>
+              <rect :x="-(node.width || 106) / 2" :y="-(node.height || 58) / 2" :width="node.width || 106" :height="node.height || 58" rx="5"></rect>
+              <text class="node-title" :x="-(node.width || 106) / 2 + 6" y="-16">{{ node.name.length > 12 ? `${node.name.slice(0, 12)}...` : node.name }}</text>
+              <text v-if="node.addressLabel" :x="-(node.width || 106) / 2 + 6" y="-3" class="node-address">{{ node.addressLabel.length > 14 ? `${node.addressLabel.slice(0, 14)}...` : node.addressLabel }}</text>
+              <text :x="-(node.width || 106) / 2 + 6" y="10" class="node-subtitle">{{ node.status || node.role || node.inferredZone || "host" }}</text>
+              <text v-if="node.flagLabel" :x="-(node.width || 106) / 2 + 6" y="22" class="node-flag-method">{{ node.flagLabel.length > 14 ? `${node.flagLabel.slice(0, 14)}...` : node.flagLabel }}</text>
+              <text v-else-if="node.servicesLabel" :x="-(node.width || 106) / 2 + 6" y="22" class="node-services">{{ node.servicesLabel.length > 14 ? `${node.servicesLabel.slice(0, 14)}...` : node.servicesLabel }}</text>
             </g>
           </svg>
           <div class="topology-legend">
             <span><i class="entry"></i>入口</span>
             <span><i class="host"></i>主机</span>
-            <span><i class="service"></i>服务</span>
+            <span><i class="gateway"></i>网关/跳板</span>
             <span><i class="access"></i>已获权限</span>
             <span><i class="flag"></i>已获 flag</span>
           </div>
@@ -601,11 +650,19 @@ watch(
         <div class="asset-grid">
           <article v-for="node in store.assets" :key="node.id" class="asset-card">
             <strong>{{ node.name }}</strong>
-            <span>{{ node.inferredZone || "unknown" }} · {{ node.status || "discovered" }}</span>
+            <span>{{ node.kind || "node" }} · {{ node.inferredZone || "unknown" }} · {{ node.status || "discovered" }}</span>
+            <span v-if="node.addresses?.length">地址：{{ node.addresses.join(", ") }}</span>
+            <span v-if="node.accessGained || node.flagFound">{{ node.accessGained ? "已获权限" : "" }} {{ node.flagFound ? "已获 flag" : "" }}</span>
             <small>first: {{ node.firstSeenIter || "-" }} / last: {{ node.lastSeenIter || "-" }}</small>
             <ul>
               <li v-for="svc in node.services || []" :key="`${svc.port}-${svc.name}`">
-                {{ svc.port || "?" }} / {{ svc.name || "unknown" }}
+                {{ svc.port || "?" }} / {{ svc.name || "unknown" }} {{ svc.version || "" }}
+              </li>
+            </ul>
+            <ul v-if="node.flags?.length" class="asset-flags">
+              <li v-for="flag in node.flags" :key="flag.value">
+                <code>{{ flag.value }}</code>
+                <span>{{ flag.method || "remote evidence" }}</span>
               </li>
             </ul>
           </article>
@@ -657,7 +714,8 @@ watch(
               <span>方法：{{ flag.evidence?.method || "待确认" }}</span>
               <span>轮次：{{ flag.evidence?.iter ?? "-" }}</span>
             </div>
-            <p v-if="flag.evidence?.summary">{{ flag.evidence.summary }}</p>
+            <p v-if="flag.evidence?.exploitSummary" class="flag-exploit">{{ flag.evidence.exploitSummary }}</p>
+            <p v-if="flag.evidence?.summary" class="flag-evidence-summary">{{ flag.evidence.summary }}</p>
             <pre v-if="flag.evidence?.command">{{ flag.evidence.command }}</pre>
           </li>
         </ul>

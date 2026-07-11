@@ -44,6 +44,8 @@ export class Whiteboard {
       flags: findings.newFlags || [],
       hosts: findings.newHosts || [],
       services: findings.newServices || [],
+      topology: findings.topology || { networks: [], hosts: [], services: [], routes: [] },
+      flagEvidence: findings.flagEvidence || [],
       credentials: findings.newCredentials || [],
       skillsUsed: findings.skillsUsed || [],
       playbooksUsed: findings.playbooksUsed || [],
@@ -128,6 +130,13 @@ export class Whiteboard {
       if (iter.hosts.length) lines.push(`  Hosts: ${clipList(iter.hosts, maxListItems, maxFieldLength).join(", ")}`);
       if (iter.services.length) {
         lines.push(`  Services: ${clipList(iter.services.map((s) => `${s.host}:${s.port}`), maxListItems, maxFieldLength).join(", ")}`);
+      }
+      const topology = iter.topology || {};
+      if (topology.networks?.length || topology.hosts?.length || topology.routes?.length) {
+        lines.push(`  Topology: ${topology.networks?.length || 0} networks, ${topology.hosts?.length || 0} hosts, ${topology.services?.length || 0} services, ${topology.routes?.length || 0} routes`);
+      }
+      if (iter.flagEvidence?.length) {
+        lines.push(`  Flag evidence: ${clipList(iter.flagEvidence.map((item) => `${item.value}@${item.hostId || "?"}: ${item.method || "unknown method"}`), maxListItems, maxFieldLength).join("; ")}`);
       }
       if (iter.credentials.length) {
         lines.push(`  Credentials: ${clipList(iter.credentials.map((c) => `${c.username || "?"}:${c.password || "?"}@${c.host || "?"}`), maxListItems, maxFieldLength).join(", ")}`);

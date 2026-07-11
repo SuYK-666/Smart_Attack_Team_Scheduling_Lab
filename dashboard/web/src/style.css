@@ -752,7 +752,7 @@ code {
 .topology-panel {
   margin: 12px 0 18px;
   border: 1px solid rgba(255, 255, 255, 0.72);
-  border-radius: 20px;
+  border-radius: 8px;
   background: rgba(248, 250, 252, 0.48);
   overflow: auto;
 }
@@ -760,13 +760,13 @@ code {
 .topology-panel svg {
   width: 100%;
   height: auto;
-  min-height: 480px;
+  min-height: 260px;
   display: block;
 }
 
 .topology-edge {
   stroke: rgba(71, 85, 105, 0.28);
-  stroke-width: 1.15;
+  stroke-width: 1.1;
   marker-end: url("#arrow");
   vector-effect: non-scaling-stroke;
 }
@@ -775,36 +775,73 @@ code {
   fill: rgba(71, 85, 105, 0.56);
 }
 
-.topology-node circle {
-  fill: rgba(255, 255, 255, 0.92);
-  stroke: #64748b;
-  stroke-width: 1.75;
-  filter: drop-shadow(0 8px 14px rgba(15, 23, 42, 0.1));
+.topology-lane rect {
+  fill: rgba(241, 245, 249, 0.54);
+  stroke: rgba(203, 213, 225, 0.7);
+  stroke-width: 1;
 }
 
-.topology-node.entry circle { stroke: #2563eb; fill: rgba(219, 234, 254, 0.96); }
-.topology-node.host circle { stroke: #14b8a6; fill: rgba(204, 251, 241, 0.9); }
-.topology-node.service circle { stroke: #64748b; fill: rgba(241, 245, 249, 0.96); }
-.topology-node.access circle { stroke: #16a34a; fill: rgba(220, 252, 231, 0.96); }
-.topology-node.flag circle { stroke: #ca8a04; fill: rgba(254, 249, 195, 0.96); }
+.topology-lane .topology-lane-label-bg {
+  fill: rgba(255, 255, 255, 0.82);
+  stroke: rgba(203, 213, 225, 0.52);
+}
+
+.topology-lane text {
+  text-anchor: middle;
+  fill: #475569;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+.topology-node rect {
+  fill: rgba(255, 255, 255, 0.94);
+  stroke: #64748b;
+  stroke-width: 1.2;
+  filter: drop-shadow(0 5px 10px rgba(15, 23, 42, 0.09));
+}
+
+.topology-node.entry rect { stroke: #2563eb; fill: rgba(219, 234, 254, 0.96); }
+.topology-node.host rect { stroke: #14b8a6; fill: rgba(204, 251, 241, 0.9); }
+.topology-node.gateway rect { stroke: #7c3aed; fill: rgba(237, 233, 254, 0.96); }
+.topology-node.access rect { stroke: #16a34a; fill: rgba(220, 252, 231, 0.96); }
+.topology-node.flag rect { stroke: #ca8a04; fill: rgba(254, 249, 195, 0.96); }
 
 .topology-node text {
-  text-anchor: middle;
+  text-anchor: start;
   fill: #0f172a;
-  font-size: 11px;
+  font-size: 7px;
   font-weight: 800;
+  letter-spacing: 0;
+}
+
+.topology-node .node-title {
+  font-size: 8px;
+  font-weight: 900;
 }
 
 .topology-node .node-subtitle {
   fill: #64748b;
-  font-size: 9px;
+  font-size: 7px;
   font-weight: 700;
 }
 
 .topology-node .node-address {
   fill: #334155;
-  font-size: 9px;
+  font-size: 7px;
   font-weight: 800;
+}
+
+.topology-node .node-services {
+  fill: #0f766e;
+  font-size: 7px;
+  font-weight: 800;
+}
+
+.topology-node .node-flag-method {
+  fill: #92400e;
+  font-size: 7px;
+  font-weight: 900;
 }
 
 .topology-legend {
@@ -827,14 +864,14 @@ code {
 .topology-legend i {
   width: 11px;
   height: 11px;
-  border-radius: 999px;
+  border-radius: 3px;
   border: 2px solid #64748b;
   background: white;
 }
 
 .topology-legend .entry { border-color: #2563eb; background: #dbeafe; }
 .topology-legend .host { border-color: #14b8a6; background: #ccfbf1; }
-.topology-legend .service { border-color: #64748b; background: #f1f5f9; }
+.topology-legend .gateway { border-color: #7c3aed; background: #ede9fe; }
 .topology-legend .access { border-color: #16a34a; background: #dcfce7; }
 .topology-legend .flag { border-color: #ca8a04; background: #fef9c3; }
 
@@ -854,6 +891,38 @@ code {
   display: block;
   color: #64748b;
   margin-top: 6px;
+}
+
+.asset-card ul {
+  margin: 10px 0 0;
+  padding-left: 16px;
+  color: #334155;
+  font-size: 12px;
+}
+
+.asset-flags {
+  padding-left: 0 !important;
+  list-style: none;
+}
+
+.asset-flags li {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid rgba(234, 179, 8, 0.28);
+  border-radius: 6px;
+  background: rgba(254, 249, 195, 0.42);
+}
+
+.asset-flags code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.asset-flags span {
+  margin-top: 0;
+  color: #92400e;
+  font-weight: 800;
 }
 
 .team-card {
@@ -1111,6 +1180,24 @@ code {
   border-radius: 999px;
   padding: 5px 10px;
   font-size: 12px;
+}
+
+.flag-exploit {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  color: #0f172a;
+  background: rgba(236, 253, 245, 0.64);
+  border: 1px solid rgba(20, 184, 166, 0.26);
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.flag-evidence-summary {
+  margin: 10px 0 0;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .flag-list pre {

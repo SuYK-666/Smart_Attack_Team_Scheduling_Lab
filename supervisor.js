@@ -27,6 +27,13 @@ Schema:
   "newFlags": ["flag strings"],
   "newHosts": ["new IPs or hostnames"],
   "newServices": [{"host":"ip","port":80,"name":"http"}],
+  "topology": {
+    "networks": [{"id":"cidr-or-name","cidr":"10.0.0.0/24","name":"zone name","evidence":"observable command output","confidence":"confirmed|inferred"}],
+    "hosts": [{"id":"stable hostname-or-ip","hostname":"host name","addresses":["ip"],"networkIds":["cidr-or-name"],"role":"entry|router|server|workstation","evidence":"observable command output","confidence":"confirmed|inferred"}],
+    "services": [{"id":"host:port","hostId":"stable host id","address":"ip","port":80,"name":"http","version":"version if observed","evidence":"observable response or scan","confidence":"confirmed|inferred"}],
+    "routes": [{"from":"host id","to":"network id or host id","via":"gateway host id or IP","evidence":"route/trace/request evidence","confidence":"confirmed|inferred"}]
+  },
+  "flagEvidence": [{"value":"flag string","hostId":"source host id","serviceId":"host:port","path":"target-side flag path/object","method":"vulnerability or access method","via":["pivot/access path"],"command":"evidence command","evidence":"observable result","confidence":"confirmed|inferred"}],
   "newCredentials": [{"username":"","password":"","host":"","service":""}],
   "skillsUsed": [{"name":"skill name","reason":"why it was selected","result":"verification result or why skipped"}],
   "playbooksUsed": [{"id":"playbook id","evidence":"why it matched","step":"last executed step","result":"success/failure/blocker"}],
@@ -47,6 +54,9 @@ Rules:
 - Extract visible playbook usage from sections like 【Playbook 使用】, including playbook id, matching evidence, last executed step, result, and blockers.
 - Do not invent hidden chain-of-thought. Use observable evidence and concise decision summaries.
 - Include failed attempts when visible.
+- Topology must contain only observed facts. A hostname/IP mentioned only in a hint is inferred, never confirmed.
+- Keep the public endpoint, the compromised internal host, routers, networks, and services as separate entities. Do not imply a direct edge when requests were executed through a foothold.
+- For every discovered flag, identify its target host and acquisition method from the command/result that produced it. The host is where the flag resides, not the machine that issued curl.
 - Filter noise, but preserve important command evidence, URLs, credentials, upload paths, sessions, callbacks, and flags.`;
 
 export async function supervise(output, config = {}) {
@@ -118,6 +128,8 @@ function mergeWithFallback(parsed, fallback) {
     newFlags: sanitizeFlags(mergeUnique(parsed.newFlags, fallback.newFlags)),
     newHosts: mergeUnique(parsed.newHosts, fallback.newHosts),
     newServices: parsed.newServices?.length ? parsed.newServices : fallback.newServices,
+    topology: sanitizeTopology(parsed.topology || fallback.topology),
+    flagEvidence: sanitizeFlagEvidence(parsed.flagEvidence || fallback.flagEvidence),
     newCredentials: sanitizeCredentials(parsed.newCredentials?.length ? parsed.newCredentials : fallback.newCredentials),
     skillsUsed: parsed.skillsUsed?.length ? parsed.skillsUsed : fallback.skillsUsed,
     playbooksUsed: parsed.playbooksUsed?.length ? parsed.playbooksUsed : fallback.playbooksUsed,
@@ -173,7 +185,7 @@ function filterFindingsByScope(findings, config = {}) {
   if (nextSteps.length !== (findings.nextSteps || []).length) outOfScope.push(`已过滤提到 ${targetHost} 其他端口的下一步建议`);
 
   if (!outOfScope.length) {
-    return { ...findings, newHosts, newServices, intel, nextSteps };
+    return { ...findings, newHosts, newServices, topology: filterTopologyByScope(findings.topology, { targetHost, targetPort, allowPrivatePivot, scopeMode }), intel, nextSteps };
   }
 
   const uniqueOut = [...new Set(outOfScope)].slice(0, 10);
@@ -181,6 +193,7 @@ function filterFindingsByScope(findings, config = {}) {
     ...findings,
     newHosts,
     newServices,
+    topology: filterTopologyByScope(findings.topology, { targetHost, targetPort, allowPrivatePivot, scopeMode }),
     intel,
     nextSteps,
     problems: [
@@ -296,6 +309,8 @@ function basicExtract(output) {
     newFlags: flags,
     newHosts: hosts,
     newServices: [],
+    topology: { networks: [], hosts: [], services: [], routes: [] },
+    flagEvidence: [],
     newCredentials: sanitizeCredentials(creds),
     skillsUsed,
     playbooksUsed,
@@ -583,6 +598,51 @@ function mergeProblems(a = [], b = []) {
   return merged;
 }
 
+function sanitizeTopology(value = {}) {
+  const topology = value && typeof value === "object" ? value : {};
+  return {
+    networks: sanitizeObjectList(topology.networks, ["id", "cidr", "name", "evidence", "confidence"]),
+    hosts: sanitizeObjectList(topology.hosts, ["id", "hostname", "addresses", "networkIds", "role", "evidence", "confidence"]),
+    services: sanitizeObjectList(topology.services, ["id", "hostId", "address", "port", "name", "version", "evidence", "confidence"]),
+    routes: sanitizeObjectList(topology.routes, ["from", "to", "via", "evidence", "confidence"]),
+  };
+}
+
+function sanitizeFlagEvidence(values = []) {
+  return sanitizeObjectList(values, ["value", "hostId", "serviceId", "path", "method", "via", "command", "evidence", "confidence"])
+    .filter((item) => isCommonFlag(item.value));
+}
+
+function sanitizeObjectList(values, fields) {
+  if (!Array.isArray(values)) return [];
+  return values.slice(0, 100).map((value) => {
+    if (!value || typeof value !== "object") return null;
+    const item = {};
+    for (const field of fields) {
+      const current = value[field];
+      if (Array.isArray(current)) item[field] = current.map((entry) => String(entry).slice(0, 240)).slice(0, 20);
+      else if (field === "port" && Number.isFinite(Number(current))) item[field] = Number(current);
+      else if (current != null) item[field] = String(current).slice(0, 1000);
+    }
+    return item;
+  }).filter(Boolean);
+}
+
+function filterTopologyByScope(value, policy) {
+  const topology = sanitizeTopology(value);
+  topology.hosts = topology.hosts.filter((host) => {
+    const addresses = host.addresses?.length ? host.addresses : [host.id];
+    return addresses.some((address) => classifyHostScope(address, policy).allowed);
+  });
+  const hostIds = new Set(topology.hosts.map((host) => host.id));
+  topology.services = topology.services.filter((service) => {
+    if (hostIds.has(service.hostId)) return true;
+    return classifyServiceScope({ host: service.address || service.hostId, port: service.port }, policy).allowed;
+  });
+  topology.routes = topology.routes.filter((route) => hostIds.has(route.from) || hostIds.has(route.via));
+  return topology;
+}
+
 function dedupeCreds(creds) {
   const seen = new Set();
   return creds.filter((c) => {
@@ -643,6 +703,8 @@ function emptyFindings(summary) {
     newFlags: [],
     newHosts: [],
     newServices: [],
+    topology: { networks: [], hosts: [], services: [], routes: [] },
+    flagEvidence: [],
     newCredentials: [],
     skillsUsed: [],
     playbooksUsed: [],
