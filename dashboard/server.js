@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { cpSync, createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -29,7 +29,9 @@ const server = createServer((req, res) => {
     if (url.pathname === "/api/run" && req.method === "GET") return json(res, runStatus());
     if (url.pathname === "/api/run" && req.method === "POST") return readBody(req).then((body) => startRun(body, res)).catch((err) => json(res, { error: err.message }, 400));
     if (url.pathname === "/api/run/stop" && req.method === "POST") return stopRun(res);
-    if (url.pathname === "/api/history") return json(res, listHistory());
+    if (url.pathname === "/api/run/resume-current" && req.method === "POST") return readBody(req).then((body) => resumeCurrentRun(body, res)).catch((err) => json(res, { error: err.message }, 400));
+    if (url.pathname === "/api/history" && req.method === "GET") return json(res, listHistory());
+    if (url.pathname === "/api/history" && req.method === "DELETE") return deleteHistoryRun(url.searchParams.get("id") || "", res);
     if (url.pathname === "/api/state") return json(res, readState(pathsForRun(url.searchParams.get("runId"))));
     if (url.pathname === "/api/status") {
       const paths = pathsForRun(url.searchParams.get("runId"));
@@ -92,6 +94,7 @@ function runStatus() {
   return {
     running: Boolean(activeRun),
     active: activeRun ? publicRun(activeRun) : null,
+    recoverable: activeRun ? null : currentRecoverableRun(),
     recent: listHistory().slice(0, 8),
   };
 }
@@ -109,6 +112,8 @@ function publicRun(run) {
     signal: run.signal || null,
     status: run.status,
     target: run.target,
+    resumedFrom: run.resumedFrom,
+    recoverable: run.recoverable,
   };
 }
 
@@ -155,6 +160,31 @@ function startRun(body, res) {
   archiveCurrentSnapshot();
 
   const { args, target } = buildAgentArgs(body || {});
+  const run = launchRun(args, target, { status: "running" });
+  return json(res, { ok: true, run: publicRun(run) }, 201);
+}
+
+function resumeCurrentRun(body, res) {
+  if (activeRun) return json(res, { error: "agent is already running", run: publicRun(activeRun) }, 409);
+  const recoverable = currentRecoverableRun();
+  if (!recoverable?.recoverable) return json(res, { error: "no recoverable current run" }, 409);
+
+  const status = readJson(join(penDir, "status.json"), {});
+  const state = readState(pathsForRun());
+  let args = Array.isArray(status.args) && status.args.length ? [...status.args] : buildArgsFromSnapshot(state, status);
+  args = applyResumeOverrides(args, body || {});
+  if (!args.includes("--resume")) args.push("--resume");
+
+  const target = recoverable.target || targetFromArgs(args) || state._config?.target || "";
+  const run = launchRun(args, target, {
+    status: "running",
+    resumedFrom: status.runId || status.resumedFrom || "current",
+    resumeMode: "current",
+  });
+  return json(res, { ok: true, run: publicRun(run) }, 201);
+}
+
+function launchRun(args, target, options = {}) {
   const child = spawn(process.execPath, args, {
     cwd: rootDir,
     stdio: ["ignore", "inherit", "inherit"],
@@ -170,14 +200,33 @@ function startRun(body, res) {
     target,
     child,
     startedAt: new Date().toISOString(),
-    status: "running",
+    status: options.status || "running",
+    resumedFrom: options.resumedFrom || null,
   };
   activeRun = run;
+  writeCurrentStatus({
+    phase: "running",
+    recoverable: false,
+    runId: run.id,
+    pid: run.pid,
+    args,
+    target,
+    startedAt: run.startedAt,
+    resumedFrom: run.resumedFrom,
+    resumeMode: options.resumeMode || null,
+  });
   child.on("exit", (code, signal) => {
-    run.status = code === 0 ? "completed" : "failed";
+    run.status = signal ? "interrupted" : code === 0 ? "completed" : "failed";
     run.exitCode = code;
     run.signal = signal;
     run.endedAt = new Date().toISOString();
+    writeCurrentStatus({
+      phase: run.status,
+      recoverable: Boolean(signal || code !== 0),
+      endedAt: run.endedAt,
+      exitCode: code,
+      signal,
+    });
     archiveRunSnapshot(run);
     upsertHistory(publicRun(run));
     if (activeRun?.id === run.id) activeRun = null;
@@ -186,18 +235,30 @@ function startRun(body, res) {
     run.status = "failed";
     run.error = err.message;
     run.endedAt = new Date().toISOString();
+    writeCurrentStatus({
+      phase: "failed",
+      recoverable: true,
+      endedAt: run.endedAt,
+      error: err.message,
+    });
     archiveRunSnapshot(run);
     upsertHistory(publicRun(run));
     if (activeRun?.id === run.id) activeRun = null;
   });
-
-  return json(res, { ok: true, run: publicRun(run) }, 201);
+  return run;
 }
 
 function stopRun(res) {
   if (!activeRun) return json(res, { ok: true, stopped: false });
   const run = activeRun;
   run.status = "stopping";
+  run.recoverable = true;
+  writeCurrentStatus({
+    phase: "stopping",
+    recoverable: true,
+    stoppedAt: new Date().toISOString(),
+    message: "User requested stop; run can be resumed.",
+  });
   run.child.kill("SIGTERM");
   setTimeout(() => {
     if (activeRun?.id === run.id) run.child.kill("SIGKILL");
@@ -226,6 +287,66 @@ function buildAgentArgs(body) {
   if (body.apiKey) addStringArg(args, "--key", body.apiKey, 512);
 
   return { args, target: `${parsed.host}:${parsed.port}` };
+}
+
+function buildArgsFromSnapshot(state = {}, status = {}) {
+  const target = parseTarget(status.target || state._config?.target || "127.0.0.1:80");
+  const args = ["index.js", "--target", target.host, "--port", String(target.port)];
+  addArgValue(args, "--flags", state._flagsNeeded || 1);
+  if (state._config?.maxFlags && state._config.maxFlags !== "unlimited") addArgValue(args, "--max-flags", state._config.maxFlags);
+  addArgValue(args, "--max-loops", 8);
+  addArgValue(args, "--min-loops", 1);
+  addArgValue(args, "--stop-after-stale", 2);
+  addArgValue(args, "--proxy-port", 9999);
+  if (state._config?.scopeMode) addArgValue(args, "--scope", state._config.scopeMode);
+  if (state._config?.allowPrivatePivot === false) args.push("--no-private-pivot");
+  return args;
+}
+
+function applyResumeOverrides(args, body = {}) {
+  const next = [...args];
+  replaceNumberArg(next, "--max-loops", body.maxLoops, 1, 500);
+  replaceNumberArg(next, "--min-loops", body.minLoops, 1, 500);
+  replaceNumberArg(next, "--stop-after-stale", body.stopAfterStale, 1, 100);
+  replaceStringArg(next, "--model", body.model, 160);
+  replaceStringArg(next, "--agent", body.agent, 80);
+  replaceStringArg(next, "--attach", body.attachUrl, 240);
+  return next;
+}
+
+function addArgValue(args, name, value) {
+  if (value === undefined || value === null || value === "") return;
+  args.push(name, String(value));
+}
+
+function replaceNumberArg(args, name, value, min, max) {
+  if (value === undefined || value === null || value === "") return;
+  const num = Number(value);
+  if (!Number.isFinite(num) || num < min || num > max) throw new Error(`${name} is out of range`);
+  replaceArg(args, name, String(Math.trunc(num)));
+}
+
+function replaceStringArg(args, name, value, maxLength) {
+  const text = String(value || "").trim();
+  if (!text) return;
+  if (text.length > maxLength) throw new Error(`${name} is too long`);
+  if (/[\u0000-\u001f]/.test(text)) throw new Error(`${name} contains invalid control characters`);
+  replaceArg(args, name, text);
+}
+
+function replaceArg(args, name, value) {
+  const index = args.indexOf(name);
+  if (index >= 0) {
+    args[index + 1] = value;
+    return;
+  }
+  args.push(name, value);
+}
+
+function targetFromArgs(args = []) {
+  const host = args[args.indexOf("--target") + 1];
+  const port = args[args.indexOf("--port") + 1];
+  return host && port ? `${host}:${port}` : "";
 }
 
 function parseTarget(input) {
@@ -305,6 +426,34 @@ function readStatus(paths = pathsForRun()) {
   };
 }
 
+function currentRecoverableRun() {
+  const status = readJson(join(penDir, "status.json"), {});
+  const state = readState(pathsForRun());
+  const rawFlags = readJson(join(artifactDir, "flags.json"), { count: 0, flags: [] });
+  const flags = normalizeFlagState(rawFlags, state, pathsForRun());
+  const iterations = state.iteration || state.iterations?.length || 0;
+  const hasState = iterations > 0 || flags.count > 0 || existsSync(join(penDir, "stream.log"));
+  if (!hasState) return null;
+
+  const phase = String(status.phase || "idle");
+  const recoverable = Boolean(status.recoverable)
+    || /^(failed|interrupted|stopping)$/i.test(phase)
+    || (phase === "completed" && state._config?.maxFlags && flags.count < Number(state._config.maxFlags));
+  if (!recoverable) return null;
+
+  return {
+    recoverable: true,
+    phase,
+    reason: status.message || (phase === "completed" ? "completed before max flags" : "stopped or interrupted"),
+    target: status.target || state._config?.target || flags.target || "",
+    flagsFound: flags.count || 0,
+    maxFlags: state._config?.maxFlags || rawFlags.maxFlags || null,
+    iterations,
+    lastUpdatedAt: status.time || status.endedAt || statTime(join(penDir, "stream.log")) || null,
+    runId: status.runId || null,
+  };
+}
+
 function readJson(path, fallback) {
   try {
     if (!existsSync(path)) return fallback;
@@ -314,10 +463,38 @@ function readJson(path, fallback) {
   }
 }
 
+function writeCurrentStatus(data) {
+  const statusPath = join(penDir, "status.json");
+  const previous = readJson(statusPath, {});
+  mkdirSync(penDir, { recursive: true });
+  writeFileSync(statusPath, JSON.stringify({
+    ...previous,
+    ...data,
+    time: data.time || new Date().toISOString(),
+  }, null, 2), "utf-8");
+}
+
 function listHistory() {
   return readHistoryIndex()
     .sort((a, b) => String(b.startedAt || b.id).localeCompare(String(a.startedAt || a.id)))
     .map((run) => ({ ...run, command: run.command || (run.args ? `node ${maskArgs(run.args).join(" ")}` : "") }));
+}
+
+function deleteHistoryRun(id, res) {
+  const cleanId = String(id || "").trim();
+  if (!cleanId || cleanId === "current" || cleanId.includes("/") || cleanId.includes("\\")) {
+    return json(res, { error: "invalid history id" }, 400);
+  }
+  const rows = readHistoryIndex();
+  const nextRows = rows.filter((run) => run.id !== cleanId);
+  const existed = nextRows.length !== rows.length || existsSync(join(historyDir, cleanId));
+  writeHistoryIndex(nextRows);
+  try {
+    rmSync(join(historyDir, cleanId), { recursive: true, force: true });
+  } catch (e) {
+    return json(res, { error: `failed to delete history snapshot: ${e.message}` }, 500);
+  }
+  return json(res, { ok: true, deleted: existed, id: cleanId, history: listHistory() });
 }
 
 function readHistoryIndex() {
@@ -327,16 +504,62 @@ function readHistoryIndex() {
 
 function writeHistoryIndex(rows) {
   mkdirSync(historyDir, { recursive: true });
-  writeFileSync(historyIndexPath, JSON.stringify(rows.slice(0, 100), null, 2), "utf-8");
+  writeFileSync(historyIndexPath, JSON.stringify(dedupeHistoryRows(rows).slice(0, 100), null, 2), "utf-8");
 }
 
 function upsertHistory(run) {
   const rows = readHistoryIndex();
   const sanitized = publicHistoryRun(run);
-  const index = rows.findIndex((item) => item.id === sanitized.id);
+  const index = rows.findIndex((item) => item.id === sanitized.id || isDuplicateHistoryRun(item, sanitized));
   if (index >= 0) rows[index] = { ...rows[index], ...sanitized };
   else rows.push(sanitized);
   writeHistoryIndex(rows.sort((a, b) => String(b.startedAt || b.id).localeCompare(String(a.startedAt || a.id))));
+}
+
+function dedupeHistoryRows(rows) {
+  const deduped = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const index = deduped.findIndex((item) => item.id === row.id || isDuplicateHistoryRun(item, row));
+    if (index >= 0) deduped[index] = preferHistoryRun(deduped[index], row);
+    else deduped.push(row);
+  }
+  return deduped;
+}
+
+function preferHistoryRun(a, b) {
+  const aManual = isSyntheticHistoryId(a.id);
+  const bManual = isSyntheticHistoryId(b.id);
+  if (aManual !== bManual) return aManual ? b : a;
+  const aComplete = a.status === "completed";
+  const bComplete = b.status === "completed";
+  if (aComplete !== bComplete) return aComplete ? a : b;
+  return Date.parse(b.endedAt || 0) > Date.parse(a.endedAt || 0) ? b : a;
+}
+
+function isDuplicateHistoryRun(a, b) {
+  if (!a || !b) return false;
+  if (String(a.id || "") === String(b.id || "")) return true;
+  if (String(a.target || "") !== String(b.target || "")) return false;
+
+  const sameProgress = Number(a.flagsFound || 0) === Number(b.flagsFound || 0)
+    && Number(a.iterations || 0) === Number(b.iterations || 0)
+    && String(a.summary || "") === String(b.summary || "");
+  if (!sameProgress) return false;
+
+  const aStart = Date.parse(a.startedAt || "");
+  const bStart = Date.parse(b.startedAt || "");
+  const aEnd = Date.parse(a.endedAt || a.startedAt || "");
+  const bEnd = Date.parse(b.endedAt || b.startedAt || "");
+  if (![aStart, bStart, aEnd, bEnd].every(Number.isFinite)) return false;
+
+  const windowsOverlap = aStart <= bEnd && bStart <= aEnd;
+  const endsClose = (isSyntheticHistoryId(a.id) || isSyntheticHistoryId(b.id))
+    && Math.abs(aEnd - bEnd) <= 5 * 60 * 1000;
+  return windowsOverlap || endsClose;
+}
+
+function isSyntheticHistoryId(id) {
+  return /^(manual|interrupted)-/.test(String(id || ""));
 }
 
 function publicHistoryRun(run) {
@@ -388,13 +611,23 @@ function archiveCurrentSnapshot(options = {}) {
   const target = state._config?.target || "";
   const prefix = options.idPrefix || "manual";
   const id = `${prefix}-${String(startedAt).replace(/[^0-9A-Za-z]/g, "").slice(0, 32) || Date.now()}`;
-  const existing = readHistoryIndex().find((item) => item.id === id || (item.startedAt === startedAt && (item.target || "") === target));
+  const currentFlags = normalizeFlagState(readJson(join(artifactDir, "flags.json"), { count: 0, flags: [] }), state, pathsForRun());
+  const snapshot = {
+    id,
+    startedAt,
+    endedAt: statTime(logPath) || new Date().toISOString(),
+    target,
+    flagsFound: currentFlags.count || 0,
+    iterations: state.iteration || state.iterations?.length || 0,
+    summary: state.iterations?.at(-1)?.summary || "",
+  };
+  const existing = readHistoryIndex().find((item) => item.id === id || isDuplicateHistoryRun(item, snapshot));
   if (existing) return false;
 
   const run = {
     id,
     startedAt,
-    endedAt: statTime(logPath) || new Date().toISOString(),
+    endedAt: snapshot.endedAt,
     status: options.status || "archived",
     target,
   };
@@ -519,26 +752,47 @@ function enrichFlags(paths = pathsForRun()) {
     ...flags,
     flags: (flags.flags || []).map((flag) => ({
       ...flag,
-      evidence: findFlagEvidence(flag.value, state, logLines),
+      evidence: findFlagEvidence(flag.value, state, logLines, flag),
     })),
   };
 }
 
 function normalizeFlagState(rawFlags, state, paths = pathsForRun()) {
   const values = [];
+  const metadata = new Map();
+  const rememberFlag = (value, patch = {}) => {
+    if (!value) return;
+    values.push(value);
+    metadata.set(value, { ...(metadata.get(value) || {}), ...patch });
+  };
   for (const item of rawFlags.flags || []) {
-    if (typeof item === "string") values.push(item);
-    else if (item?.value) values.push(item.value);
-    else if (item?.flag) values.push(item.flag);
+    if (typeof item === "string") rememberFlag(item);
+    else if (item?.value) rememberFlag(item.value, item);
+    else if (item?.flag) rememberFlag(item.flag, { ...item, value: item.flag });
   }
 
   try {
     const text = readFileSync(join(paths.artifactDir, "flags.txt"), "utf-8");
-    values.push(...text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+    for (const line of text.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) rememberFlag(line);
   } catch {}
 
   for (const iter of state.iterations || []) {
-    values.push(...(iter.flags || []));
+    for (const flag of iter.flags || []) rememberFlag(flag, { iter: iter.iter });
+    for (const item of iter.flagEvidence || []) {
+      const value = item.value || item.flag;
+      rememberFlag(value, {
+        iter: iter.iter,
+        source: item.hostId || item.host || item.serviceId || "structured evidence",
+        hostId: item.hostId,
+        serviceId: item.serviceId,
+        path: item.path,
+        method: item.method,
+        via: item.via,
+        command: item.command,
+        evidence: item.evidence,
+        confidence: item.confidence,
+      });
+    }
   }
 
   const unique = [...new Set(values.filter(Boolean))];
@@ -555,6 +809,7 @@ function normalizeFlagState(rawFlags, state, paths = pathsForRun()) {
     flags: unique.map((value, index) => ({
       index: index + 1,
       value,
+      ...metadata.get(value),
     })),
   };
 }
@@ -568,29 +823,87 @@ function syncFlagFiles(flags, paths = pathsForRun()) {
   }
 }
 
-function findFlagEvidence(flag, state, logLines) {
+function findFlagEvidence(flag, state, logLines, normalized = {}) {
+  if (normalized.method || normalized.command || normalized.evidence || normalized.hostId || normalized.serviceId) {
+    const method = normalizeExploitMethod(normalized.method, `${flag}\n${normalized.command || ""}\n${normalized.evidence || ""}\n${normalized.path || ""}`);
+    return {
+      iter: normalized.iter ?? null,
+      method,
+      summary: [normalized.hostId || normalized.serviceId, normalized.path, normalized.evidence].filter(Boolean).join("；") || "来自结构化 flagEvidence",
+      command: normalized.command || "",
+      hostId: normalized.hostId,
+      serviceId: normalized.serviceId,
+      confidence: normalized.confidence,
+      exploitSummary: describeFlagExploit(method, flag, `${normalized.command || ""}\n${normalized.evidence || ""}\n${normalized.path || ""}`),
+    };
+  }
   for (const iter of state.iterations || []) {
-    const related = findRelatedFlagEvidence(iter, flag);
-    if (related) {
+    const structured = (iter.flagEvidence || []).find((item) => (item.value || item.flag) === flag);
+    if (structured) {
+      const method = normalizeExploitMethod(structured.method, `${flag}\n${structured.command || ""}\n${structured.evidence || ""}\n${structured.path || ""}`);
       return {
         iter: iter.iter,
-        method: related.method,
+        method,
+        summary: [structured.hostId || structured.serviceId, structured.path, structured.evidence].filter(Boolean).join("；"),
+        command: structured.command || "",
+        hostId: structured.hostId,
+        serviceId: structured.serviceId,
+        confidence: structured.confidence,
+        exploitSummary: describeFlagExploit(method, flag, `${structured.command || ""}\n${structured.evidence || ""}\n${structured.path || ""}`),
+      };
+    }
+    const related = findRelatedFlagEvidence(iter, flag);
+    if (related) {
+      const method = normalizeExploitMethod(related.method, `${flag}\n${related.command || ""}\n${related.summary || ""}`);
+      return {
+        iter: iter.iter,
+        method,
         summary: related.summary,
         command: related.command,
+        exploitSummary: describeFlagExploit(method, flag, `${related.command || ""}\n${related.summary || ""}`),
       };
     }
     if ((iter.flags || []).includes(flag)) {
+      const summary = summarizeFlagFromIteration(iter, flag);
+      const method = normalizeExploitMethod("", `${flag}\n${summary}\n${findRelatedCommand(iter, flag)}`);
       return {
         iter: iter.iter,
-        method: "supervisor extraction",
-        summary: summarizeFlagFromIteration(iter, flag),
+        method,
+        summary,
         command: "",
+        exploitSummary: describeFlagExploit(method, flag, summary),
       };
     }
   }
   const line = logLines.find((item) => item.includes(flag));
-  if (line) return { iter: null, method: "stream.log", summary: line.slice(0, 240), command: "" };
-  return { iter: null, method: "streamed flag file", summary: "flag 已流式写入，来源命令待后续结构化补充", command: "" };
+  if (line) {
+    const method = normalizeExploitMethod("", `${flag}\n${line}`);
+    return { iter: null, method, summary: line.slice(0, 240), command: "", exploitSummary: describeFlagExploit(method, flag, line) };
+  }
+  const method = normalizeExploitMethod("", flag);
+  return { iter: null, method, summary: "flag 已流式写入，来源命令待后续结构化补充", command: "", exploitSummary: describeFlagExploit(method, flag, "") };
+}
+
+function normalizeExploitMethod(method = "", evidence = "") {
+  const value = String(method || "").trim();
+  if (value && !/^(curl|tool|bash|python|stream|supervisor|structured).*(output|extraction|evidence|file)?$/i.test(value)) return value;
+  return inferFlagMethod(evidence);
+}
+
+function describeFlagExploit(method, flag, evidence = "") {
+  const text = `${method}\n${flag}\n${evidence}`;
+  const known = [
+    [/sentinel_git|GitLab ExifTool RCE|gitlab|exiftool|CVE-2021-22205/i, "利用 GitLab 13.10.x ExifTool 上传解析 RCE，将 /flag.txt 写入 public 可访问路径后从入口读取。"],
+    [/sentinel_object|MinIO bootstrap env|minio|sigv4|presigned|bootstrap/i, "利用 MinIO bootstrap/环境信息泄露获得对象存储凭据，生成 SigV4 预签名 URL 后通过入口读取 flag 对象。"],
+    [/sentinel_wiki|Solr Velocity RCE|solr|velocity/i, "利用 Apache Solr VelocityResponseWriter 模板注入执行命令，在 wiki/Solr 主机上读取 /flag.txt。"],
+    [/sentinel_cache|CouchDB config command chain|couchdb|_config/i, "利用 CouchDB 管理接口/配置写入链触发命令执行，在 cache/CouchDB 主机上读取 flag。"],
+    [/sentinel_files|ProFTPD mod_copy|proftpd|mod_?copy|SITE CPFR|ftp/i, "利用 ProFTPD mod_copy/FTP 文件复制能力把受限路径中的 flag 复制到可读取目录后下载。"],
+    [/sentinel_dmz|Apache path traversal\/CGI|httpd|icons|cgi/i, "利用 Apache HTTPD 2.4.50 路径穿越读取目标文件；可用 CGI /bin/sh 时通过入口 RCE 执行目标侧命令取证。"],
+  ];
+  for (const [pattern, summary] of known) {
+    if (pattern.test(text)) return summary;
+  }
+  return "通过已获授权的远程命令、HTTP 响应或目标服务协议输出取得 flag；具体漏洞类型待结构化证据补充。";
 }
 
 function findRelatedFlagEvidence(iter, flag) {
@@ -656,23 +969,31 @@ function clipTextAroundFlag(text, flag, maxLength) {
 
 function buildAssetGraph(paths = pathsForRun()) {
   const state = readState(paths);
-  const flags = readJson(join(paths.artifactDir, "flags.json"), { count: 0, flags: [] });
+  const rawFlags = readJson(join(paths.artifactDir, "flags.json"), { count: 0, flags: [] });
+  const flags = normalizeFlagState(rawFlags, state, paths);
   const aliases = collectAssetAliases(paths);
-  const flagEvidence = collectFlagEvidence(paths);
+  const noteFlagEvidence = collectFlagEvidence(paths);
   const nodes = new Map();
   const edges = [];
-  const target = state._config?.target || flags.target || "unknown-target";
+  const networks = new Map();
+  const target = state._config?.target || rawFlags.target || "unknown-target";
   const targetIdentity = parseTargetIdentity(target);
   const entryId = targetIdentity.entryId || target;
-  addNode(nodes, entryId, { name: target, inferredZone: "external-entry", status: "entry" });
+  addNode(nodes, entryId, { name: target, kind: "entry", role: "public-entry", inferredZone: "external-entry", status: "entry" });
 
   for (const iter of state.iterations || []) {
+    mergeStructuredTopology({ iter, nodes, edges, networks, aliases, targetIdentity, entryId });
+
+    if (/entry01|cgi rce|daemon|uid=1|apache/i.test(iterationText(iter))) {
+      addNode(nodes, entryId, { accessGained: true });
+    }
     for (const host of iter.hosts || []) {
       const context = iterationText(iter);
       const classified = classifyGraphHost(host, context, targetIdentity);
       if (!classified) continue;
       addNode(nodes, classified.id, {
         name: displayNodeName(classified.id, classified.name, aliases),
+        kind: classified.status === "entry" ? "entry" : "host",
         inferredZone: classified.zone,
         status: classified.status,
         firstSeenIter: iter.iter,
@@ -685,12 +1006,14 @@ function buildAssetGraph(paths = pathsForRun()) {
       const host = hostInfo.id;
       addNode(nodes, host, {
         name: displayNodeName(host, hostInfo.name, aliases),
+        kind: host === entryId ? "entry" : "host",
         inferredZone: hostInfo.zone,
         status: hostInfo.status,
         services: [{ port: service.port, name: service.name || "unknown" }],
         firstSeenIter: iter.iter,
         lastSeenIter: iter.iter,
       });
+      if (service.port && host !== entryId) addEdge(edges, entryId, host, "observed-service", iter.iter, service.name || service.port);
     }
     for (const call of iter.toolCalls || []) {
       for (const parsed of extractUrls(call.command || "")) {
@@ -698,26 +1021,209 @@ function buildAssetGraph(paths = pathsForRun()) {
         if (!classified || classified.id === entryId) continue;
         addNode(nodes, classified.id, {
           name: displayNodeName(classified.id, classified.name, aliases),
+          kind: "host",
           inferredZone: classified.zone,
           status: classified.status,
           firstSeenIter: iter.iter,
           lastSeenIter: iter.iter,
         });
         addEdge(edges, entryId, classified.id, "observed-request", iter.iter, call.command);
+        const normalized = normalizeGraphHost(parsed.host);
+        if (normalized?.port) {
+          addNode(nodes, classified.id, {
+            services: [{ port: Number(normalized.port), name: inferServiceName(normalized.port), evidence: call.command }],
+            lastSeenIter: iter.iter,
+          });
+        }
       }
     }
     for (const access of iter.access || []) {
       const accessNode = resolveEvidenceNode(access, nodes, aliases, targetIdentity, entryId);
-      addNode(nodes, accessNode, { name: displayNodeName(accessNode, accessNode, aliases), accessGained: true, status: "access-gained" });
-    }
-    for (const flag of iter.flags || []) {
-      const evidence = [flag, iter.summary, findRelatedCommand(iter, flag), flagEvidence.get(flag)].filter(Boolean).join("\n");
-      const flagNode = resolveEvidenceNode(evidence, nodes, aliases, targetIdentity, entryId);
-      addNode(nodes, flagNode, { name: displayNodeName(flagNode, flagNode, aliases), flagFound: true, status: "flag-found" });
+      addNode(nodes, accessNode, { accessGained: true, status: nodes.get(accessNode)?.status || "access-gained" });
     }
   }
 
-  return { nodes: [...nodes.values()], edges };
+  for (const flag of flags.flags || []) {
+    const evidence = [
+      flag.value,
+      flag.method,
+      flag.hostId,
+      flag.serviceId,
+      flag.command,
+      flag.evidence,
+      noteFlagEvidence.get(flag.value),
+    ].filter(Boolean).join("\n");
+    const flagNode = resolveFlagHost(flag, evidence, nodes, aliases, targetIdentity, entryId);
+    addNode(nodes, flagNode, {
+      flagFound: true,
+      status: nodes.get(flagNode)?.status || "flag-found",
+      flags: [{
+        value: flag.value,
+        method: flag.method || inferFlagMethod(evidence),
+        iter: flag.iter,
+        path: flag.path,
+        command: flag.command,
+        evidence: String(flag.evidence || noteFlagEvidence.get(flag.value) || "").slice(0, 240),
+        confidence: flag.confidence || (flag.hostId || flag.serviceId ? "confirmed" : "inferred"),
+      }],
+    });
+  }
+
+  return pruneAssetGraph(nodes, edges, entryId, networks);
+}
+
+function mergeStructuredTopology({ iter, nodes, edges, networks, aliases, targetIdentity, entryId }) {
+  const topology = iter.topology || {};
+  for (const network of topology.networks || []) {
+    const id = cleanTopologyId(network.id || network.cidr || network.name);
+    if (!id) continue;
+    networks.set(id, {
+      id,
+      cidr: network.cidr,
+      name: network.name || network.cidr || id,
+      evidence: String(network.evidence || "").slice(0, 240),
+      confidence: network.confidence || "confirmed",
+    });
+  }
+
+  for (const host of topology.hosts || []) {
+    const id = normalizeTopologyHostId(host.id || host.hostname || host.addresses?.[0], targetIdentity, aliases);
+    if (!id || isNetworkArtifactHost(id)) continue;
+    const addresses = normalizeAddressList(host.addresses);
+    const role = String(host.role || "");
+    const isEntry = id === entryId || /entry|public/i.test(role);
+    addNode(nodes, id, {
+      name: host.hostname || displayNodeName(id, id, aliases),
+      kind: isEntry ? "entry" : "host",
+      role: host.role,
+      addresses,
+      networkIds: normalizeStringList(host.networkIds),
+      inferredZone: inferStructuredZone(host, id),
+      status: isEntry ? "entry" : (/jump|route|gateway|router|bastion/i.test(role) ? "gateway" : "discovered"),
+      firstSeenIter: iter.iter,
+      lastSeenIter: iter.iter,
+      evidence: host.evidence,
+      confidence: host.confidence,
+    });
+  }
+
+  for (const service of topology.services || []) {
+    const hostId = normalizeTopologyHostId(service.hostId || service.address, targetIdentity, aliases);
+    if (!hostId || isNetworkArtifactHost(hostId)) continue;
+    const port = Number(service.port);
+    addNode(nodes, hostId, {
+      kind: nodes.get(hostId)?.kind || "host",
+      inferredZone: nodes.get(hostId)?.inferredZone || inferHostZone(hostId),
+      services: [{
+        port: Number.isFinite(port) ? port : undefined,
+        name: service.name || inferServiceName(port),
+        version: service.version,
+        evidence: service.evidence,
+        confidence: service.confidence,
+      }],
+      firstSeenIter: iter.iter,
+      lastSeenIter: iter.iter,
+    });
+  }
+
+  for (const route of topology.routes || []) {
+    const from = normalizeTopologyHostId(route.from, targetIdentity, aliases) || entryId;
+    const via = normalizeTopologyHostId(route.via, targetIdentity, aliases);
+    const to = normalizeTopologyHostId(route.to, targetIdentity, aliases);
+    if (via) {
+      addNode(nodes, via, {
+        name: displayNodeName(via, via, aliases),
+        kind: "host",
+        inferredZone: inferHostZone(via),
+        status: "gateway",
+        role: "gateway",
+        firstSeenIter: iter.iter,
+        lastSeenIter: iter.iter,
+      });
+      addEdge(edges, from, via, "route-via", iter.iter, route.evidence);
+    }
+    if (to && !isNetworkArtifactHost(to)) {
+      addNode(nodes, to, {
+        name: displayNodeName(to, to, aliases),
+        kind: "host",
+        inferredZone: inferHostZone(to),
+        firstSeenIter: iter.iter,
+        lastSeenIter: iter.iter,
+      });
+      addEdge(edges, via || from, to, "route", iter.iter, route.evidence);
+    }
+  }
+}
+
+function cleanTopologyId(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function normalizeTopologyHostId(value, targetIdentity, aliases) {
+  const raw = cleanTopologyId(value);
+  if (!raw) return "";
+  if (/\/\d{1,2}$/.test(raw)) return "";
+  const alias = aliases.get(raw);
+  if (alias) return alias;
+  const normalized = normalizeGraphHost(raw);
+  if (!normalized) return raw;
+  if (normalized.hostname === targetIdentity.host) {
+    const samePort = !normalized.port || !targetIdentity.port || normalized.port === targetIdentity.port;
+    if (samePort) return targetIdentity.entryId;
+  }
+  return normalized.hostname;
+}
+
+function normalizeAddressList(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
+function normalizeStringList(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((item) => cleanTopologyId(item)).filter(Boolean))];
+}
+
+function inferStructuredZone(host, id) {
+  const networks = normalizeStringList(host.networkIds);
+  const joined = `${networks.join(" ")} ${host.role || ""} ${host.hostname || ""} ${id}`;
+  if (/dmz|10\.92\.10|10\.80\.10/i.test(joined)) return "dmz";
+  if (/office|10\.92\.20|10\.80\.20/i.test(joined)) return "office";
+  if (/core|10\.92\.30|10\.80\.30/i.test(joined)) return "core";
+  if (/entry|public|external/i.test(joined)) return "external-entry";
+  return inferHostZone(id);
+}
+
+function resolveFlagHost(flag, evidence, nodes, aliases, targetIdentity, entryId) {
+  const explicit = normalizeTopologyHostId(flag.hostId, targetIdentity, aliases)
+    || normalizeTopologyHostId(flag.host, targetIdentity, aliases)
+    || normalizeHostFromServiceId(flag.serviceId, targetIdentity, aliases);
+  if (explicit) return explicit;
+  return resolveEvidenceNode(evidence, nodes, aliases, targetIdentity, entryId);
+}
+
+function normalizeHostFromServiceId(serviceId, targetIdentity, aliases) {
+  const raw = String(serviceId || "").trim();
+  if (!raw) return "";
+  const withoutScheme = raw.includes("://") ? raw : `tcp://${raw}`;
+  try {
+    const parsed = new URL(withoutScheme);
+    return normalizeTopologyHostId(parsed.hostname, targetIdentity, aliases);
+  } catch {
+    const match = raw.match(/^([^:/\s]+)(?::\d+)?/);
+    return normalizeTopologyHostId(match?.[1], targetIdentity, aliases);
+  }
+}
+
+function inferFlagMethod(text) {
+  const value = String(text || "");
+  if (/exiftool|gitlab|cve-2021-22205|sentinel_git/i.test(value)) return "GitLab ExifTool RCE";
+  if (/solr|velocity|sentinel_wiki/i.test(value)) return "Solr Velocity RCE";
+  if (/couchdb|_config|sentinel_cache/i.test(value)) return "CouchDB config command chain";
+  if (/minio|sigv4|presigned|bootstrap|sentinel_object/i.test(value)) return "MinIO bootstrap env + presigned URL";
+  if (/proftpd|mod_?copy|SITE CPFR/i.test(value)) return "ProFTPD mod_copy";
+  if (/apache|cgi|path traversal|httpd|icons/i.test(value)) return "Apache path traversal/CGI";
+  return "remote evidence";
 }
 
 function collectAssetAliases(paths = pathsForRun()) {
@@ -793,6 +1299,10 @@ function displayNodeName(id, fallback, aliases) {
 function resolveEvidenceNode(text, nodes, aliases, targetIdentity, entryId) {
   const evidence = String(text || "").toLowerCase();
   const flagBody = evidence.match(/flag\{([^}\s]{3,128})\}/)?.[1] || "";
+  const sentinelNode = flagBody
+    ? resolveSentinelEvidenceNode(flagBody, nodes, entryId)
+    : resolveSentinelEvidenceNode(evidence, nodes, entryId);
+  if (sentinelNode) return sentinelNode;
 
   for (const [name, ip] of aliases.entries()) {
     if (flagBody.includes(name)) return name === "thinkphp" ? entryId : ip;
@@ -816,6 +1326,111 @@ function resolveEvidenceNode(text, nodes, aliases, targetIdentity, entryId) {
 
   if (targetIdentity.host && evidence.includes(targetIdentity.host)) return entryId;
   return entryId;
+}
+
+function resolveSentinelEvidenceNode(text, nodes, entryId) {
+  const hasSentinelGraph = [...nodes.keys()].some((id) => /^10\.92\./.test(id));
+  if (!hasSentinelGraph && !/sentinel|10\.92\./i.test(text)) return null;
+  const rules = [
+    [/couch|cache|5984/, "10.92.30.30"],
+    [/minio|object|cluster|9000/, "10.92.30.50"],
+    [/git|gitlab|exiftool|20\.20/, "10.92.20.20"],
+    [/solr|wiki|velocity|8983/, "10.92.20.11"],
+    [/proftpd|ftp|files|modcopy|30\.40/, "10.92.30.40"],
+  ];
+  for (const [pattern, host] of rules) {
+    if (!pattern.test(text)) continue;
+    if (nodes.has(host)) return host;
+    return host;
+  }
+  if (/dmz|entry|httpd|42013/.test(text)) return entryId;
+  return null;
+}
+
+function serviceNodeId(host, port) {
+  return `${host}:${port}`;
+}
+
+function inferServiceName(port) {
+  const value = Number(port);
+  return {
+    21: "ftp",
+    22: "ssh",
+    80: "http",
+    443: "https",
+    8983: "solr",
+    5984: "couchdb",
+    9000: "minio",
+    9001: "minio-console",
+  }[value] || "service";
+}
+
+function pruneAssetGraph(nodes, edges, entryId, networks = new Map()) {
+  const keep = new Set([entryId]);
+  for (const node of nodes.values()) {
+    if (node.kind === "service") continue;
+    if (node.accessGained || node.flagFound || node.services?.length || node.status === "gateway") {
+      keep.add(node.id);
+    }
+  }
+  for (const edge of edges) {
+    if (keep.has(edge.from) || keep.has(edge.to)) {
+      keep.add(edge.from);
+      keep.add(edge.to);
+    }
+  }
+
+  const prunedNodes = [...nodes.values()]
+    .filter((node) => keep.has(node.id))
+    .filter((node) => node.kind !== "service")
+    .filter((node) => node.id === entryId || node.services?.length || node.accessGained || node.flagFound || node.status === "gateway" || hasGraphEdge(node.id, edges, keep))
+    .sort(compareAssetNodes);
+  const kept = new Set(prunedNodes.map((node) => node.id));
+  const prunedEdges = normalizeSentinelEdges(edges.filter((edge) => kept.has(edge.from) && kept.has(edge.to)), kept, entryId);
+  return { nodes: prunedNodes, edges: prunedEdges, networks: [...networks.values()] };
+}
+
+function normalizeSentinelEdges(edges, kept, entryId) {
+  const gateway = "10.92.10.20";
+  if (!kept.has(gateway)) return edges;
+  const normalized = [];
+  for (const edge of edges) {
+    if (edge.from === entryId && /^10\.92\.(?:20|30)\./.test(edge.to)) {
+      normalized.push({
+        ...edge,
+        key: `${gateway}->${edge.to}:${edge.type}`,
+        from: gateway,
+      });
+      continue;
+    }
+    normalized.push(edge);
+  }
+  if (!normalized.some((edge) => edge.from === entryId && edge.to === gateway)) {
+    normalized.push({ key: `${entryId}->${gateway}:route-via`, from: entryId, to: gateway, type: "route-via", iter: null, evidence: "Sentinel 10.92.20/30 traffic observed via 10.92.10.20" });
+  }
+  const routePairs = new Set(normalized
+    .filter((edge) => /route/.test(edge.type))
+    .map((edge) => `${edge.from}->${edge.to}`));
+  const seen = new Set();
+  return normalized.filter((edge) => {
+    if (edge.type === "discovered-host" && routePairs.has(`${edge.from}->${edge.to}`)) return false;
+    const key = `${edge.from}->${edge.to}:${edge.type}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function hasGraphEdge(hostId, edges, keep) {
+  return edges.some((edge) => keep.has(edge.from) && keep.has(edge.to) && (edge.from === hostId || edge.to === hostId));
+}
+
+function compareAssetNodes(a, b) {
+  const rank = { entry: 0, host: 1, service: 2 };
+  const aRank = rank[a.kind] ?? 9;
+  const bRank = rank[b.kind] ?? 9;
+  if (aRank !== bRank) return aRank - bRank;
+  return String(a.id).localeCompare(String(b.id), undefined, { numeric: true });
 }
 
 function parseTargetIdentity(target) {
@@ -849,13 +1464,13 @@ function classifyGraphHost(value, context, targetIdentity) {
     if (samePort) return { id: targetIdentity.entryId, name: targetIdentity.entryId, zone: "external-entry", status: "entry", edgeType: "entry" };
   }
 
+  if (isNetworkArtifactHost(host.hostname)) return null;
+
   if (isRouteNextHop(host.hostname, context)) {
     return { id: host.id, name: host.id, zone: "routing", status: "gateway", edgeType: "route" };
   }
 
-  if (isNetworkArtifactHost(host.hostname)) return null;
-
-  return { id: host.id, name: host.id, zone: inferHostZone(host.hostname), status: "discovered", edgeType: "discovered-host" };
+  return { id: host.hostname, name: host.hostname, zone: inferHostZone(host.hostname), status: "discovered", edgeType: "discovered-host" };
 }
 
 function normalizeGraphHost(value) {
@@ -895,6 +1510,9 @@ function isNetworkArtifactHost(hostname) {
 }
 
 function inferHostZone(hostname) {
+  if (/^10\.92\.10\./.test(hostname) || /^10\.80\.10\./.test(hostname)) return "dmz";
+  if (/^10\.92\.20\./.test(hostname) || /^10\.80\.20\./.test(hostname)) return "office";
+  if (/^10\.92\.30\./.test(hostname) || /^10\.80\.30\./.test(hostname)) return "core";
   if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(hostname)) return "internal";
   return "external";
 }
@@ -924,14 +1542,19 @@ function addNode(nodes, id, patch) {
     accessGained: false,
     flagFound: false,
   };
-  nodes.set(id, { ...existing, ...patch, services: mergeServices(existing.services, patch.services) });
+  nodes.set(id, {
+    ...existing,
+    ...patch,
+    services: mergeServices(existing.services, patch.services),
+    flags: mergeNodeFlags(existing.flags, patch.flags),
+  });
 }
 
 function mergeServices(a = [], b = []) {
   const seen = new Set();
   const out = [];
   for (const item of [...a, ...b]) {
-    const key = `${item.port}:${item.name}`;
+    const key = `${item.port || ""}:${item.name || ""}:${item.version || ""}`;
     if (!seen.has(key)) {
       seen.add(key);
       out.push(item);
@@ -940,8 +1563,20 @@ function mergeServices(a = [], b = []) {
   return out;
 }
 
+function mergeNodeFlags(a = [], b = []) {
+  const seen = new Set();
+  const out = [];
+  for (const item of [...a, ...b]) {
+    const key = item.value || JSON.stringify(item);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
 function addEdge(edges, from, to, type, iter, evidence) {
-  const key = `${from}->${to}:${type}:${iter}`;
+  const key = `${from}->${to}:${type}`;
   if (edges.some((item) => item.key === key)) return;
   edges.push({ key, from, to, type, iter, evidence: String(evidence || "").slice(0, 240) });
 }

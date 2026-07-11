@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import type { AssetEdge, AssetNode, FlagState, NoteContent, NoteFile, RunControlState, RuntimeStatus, TeamStatusState, WhiteboardState } from "../types";
+import type { AssetEdge, AssetGraph, AssetNode, FlagState, NoteContent, NoteFile, RunControlState, RuntimeStatus, TeamStatusState, TopologyNetwork, WhiteboardState } from "../types";
 
 async function getJson<T>(url: string, fallback: T): Promise<T> {
   try {
@@ -18,7 +18,8 @@ export const useRuntimeStore = defineStore("runtime", {
     flags: { count: 0, flags: [] } as FlagState,
     assets: [] as AssetNode[],
     edges: [] as AssetEdge[],
-    run: { running: false, active: null, recent: [] } as RunControlState,
+    networks: [] as TopologyNetwork[],
+    run: { running: false, active: null, recoverable: null, recent: [] } as RunControlState,
     history: [] as RunControlState["recent"],
     selectedRunId: "",
     notes: [] as NoteFile[],
@@ -62,18 +63,19 @@ export const useRuntimeStore = defineStore("runtime", {
         getJson<RuntimeStatus>(`/api/status${suffix}`, { phase: "idle" }),
         getJson<WhiteboardState>(`/api/state${suffix}`, { iterations: [] }),
         getJson<FlagState>(`/api/flags${suffix}`, { count: 0, flags: [] }),
-        getJson<{ nodes: AssetNode[]; edges: AssetEdge[] }>(`/api/asset-graph${suffix}`, { nodes: [], edges: [] }),
+        getJson<AssetGraph>(`/api/asset-graph${suffix}`, { nodes: [], edges: [], networks: [] }),
         getJson<NoteFile[]>(`/api/notes${suffix}`, []),
         getJson<TeamStatusState>(`/api/teams${suffix}`, { teams: [] }),
         getJson<{ lines: string[] }>(`/api/logs/tail${logSuffix}`, { lines: [] }),
       ]);
-      const run = await getJson<RunControlState>("/api/run", { running: false, active: null, recent: [] });
+      const run = await getJson<RunControlState>("/api/run", { running: false, active: null, recoverable: null, recent: [] });
       const history = await getJson<RunControlState["recent"]>("/api/history", []);
       this.status = status;
       this.state = whiteboard;
       this.flags = flags;
       this.assets = graph.nodes;
       this.edges = graph.edges;
+      this.networks = graph.networks || [];
       this.notes = notes;
       this.teams = teams;
       this.run = run;
@@ -101,8 +103,28 @@ export const useRuntimeStore = defineStore("runtime", {
       }
       this.selectedRunId = "";
       this.activeNote = null;
-      this.run = { running: true, active: data.run, recent: this.run.recent || [] };
+      this.run = { running: true, active: data.run, recoverable: null, recent: this.run.recent || [] };
       this.actionMessage = "任务已启动";
+      await this.refreshAll();
+      return true;
+    },
+    async resumeCurrentRun(payload: Record<string, unknown>) {
+      this.actionError = "";
+      this.actionMessage = "";
+      const res = await fetch("/api/run/resume-current", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        this.actionError = data.error || "恢复失败";
+        return false;
+      }
+      this.selectedRunId = "";
+      this.activeNote = null;
+      this.run = { running: true, active: data.run, recoverable: null, recent: this.run.recent || [] };
+      this.actionMessage = "当前任务已恢复";
       await this.refreshAll();
       return true;
     },
@@ -127,6 +149,26 @@ export const useRuntimeStore = defineStore("runtime", {
     async showCurrentRun() {
       await this.selectRun("");
     },
+    async deleteRun(runId: string) {
+      const id = String(runId || "").trim();
+      if (!id) return false;
+      this.actionError = "";
+      this.actionMessage = "";
+      const res = await fetch(`/api/history?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        this.actionError = data.error || "删除历史失败";
+        return false;
+      }
+      if (this.selectedRunId === id) {
+        this.selectedRunId = "";
+        this.activeNote = null;
+      }
+      this.history = data.history || (this.history || []).filter((run) => run.id !== id);
+      this.actionMessage = data.deleted ? "历史记录已删除" : "历史记录不存在或已删除";
+      await this.refreshAll();
+      return true;
+    },
     connectEvents() {
       const events = new EventSource("/api/events");
       events.addEventListener("update", (event) => {
@@ -143,6 +185,7 @@ export const useRuntimeStore = defineStore("runtime", {
         this.teams = data.teams || this.teams;
         this.assets = data.graph?.nodes || [];
         this.edges = data.graph?.edges || [];
+        this.networks = data.graph?.networks || [];
         this.logLines = data.logLines || [];
         this.lastRefresh = new Date().toLocaleTimeString();
       });

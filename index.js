@@ -18,16 +18,20 @@ async function main() {
     process.exit(1);
   }
 
-  // auto-clean previous run data
+  // auto-clean previous run data unless this process is continuing a stopped run.
   const penDir = join(__dirname, ".pen-agent");
-  if (existsSync(penDir)) {
+  if (!config.resume && existsSync(penDir)) {
     rmSync(penDir, { recursive: true, force: true });
     console.log(chalk.gray("[agent] cleaned previous .pen-agent data"));
   }
-  if (existsSync(config.artifactDir)) {
+  if (!config.resume && existsSync(config.artifactDir)) {
     rmSync(config.artifactDir, { recursive: true, force: true });
     console.log(chalk.gray(`[agent] cleaned previous artifact data: ${config.artifactDir}`));
   }
+  if (config.resume) {
+    console.log(chalk.gray("[agent] resume mode: preserving existing .pen-agent and artifacts"));
+  }
+  mkdirSync(penDir, { recursive: true });
   mkdirSync(config.artifactDir, { recursive: true });
   mkdirSync(join(config.artifactDir, "scripts"), { recursive: true });
   mkdirSync(join(config.artifactDir, "payloads"), { recursive: true });
@@ -46,6 +50,14 @@ async function main() {
   console.log(chalk.bold.blue("  pen-agent — automated penetration testing agent"));
   console.log(chalk.gray("  powered by opencode\n"));
   dump(config);
+  writeFileSync(join(penDir, "status.json"), JSON.stringify({
+    phase: "running",
+    recoverable: false,
+    args: process.argv.slice(1),
+    target: config.target,
+    startedAt: new Date().toISOString(),
+    resume: config.resume,
+  }, null, 2));
 
   const startTime = Date.now();
 

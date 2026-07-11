@@ -17,7 +17,7 @@ const SKILL_RULES = [
   {
     name: "path-traversal-lfi",
     reason: "发现路径穿越、本地文件读取或敏感文件读取线索",
-    pattern: /path traversal|lfi|file read|文件读取|目录穿越|任意文件|passwd|proc\/self|download|include/i,
+    pattern: /path traversal|lfi|file read|文件读取|目录穿越|任意文件|passwd|proc\/self|download|include|apache.*2\.4\.(49|50)|cgi-bin|%32%65|mod_cgi/i,
   },
   {
     name: "cmdi-command-injection",
@@ -82,7 +82,7 @@ export function recommendSkills(context = {}) {
     });
   }
 
-  return recommendations.slice(0, 5);
+  return recommendations.slice(0, 2);
 }
 
 function collectContextText(context) {
