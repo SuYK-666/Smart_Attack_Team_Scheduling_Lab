@@ -21,7 +21,7 @@ services:
       dmz:
         ipv4_address: 10.92.10.10
     ports:
-      - "${ENTRY_BIND_IP:-127.0.0.1}:${ENTRY_PORT:-18081}:80"
+      - "${ENTRY_BIND_IP:-0.0.0.0}:${ENTRY_PORT:-18081}:80"
     depends_on:
       jump01:
         condition: service_healthy
@@ -46,7 +46,6 @@ services:
     build:
       context: ./dmz-httpd
     container_name: sentinel-entry01
-    hostname: entry01
     network_mode: "service:entry01-netns"
     depends_on:
       entry01-netns:
@@ -56,11 +55,13 @@ services:
     restart: unless-stopped
     read_only: true
     tmpfs:
+      - /run/httpd:rw,nosuid,nodev,noexec,size=16m,mode=0755
       - /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777
       - /opt/lab-work:rw,nosuid,nodev,size=64m,mode=1777
     cap_drop:
       - ALL
     cap_add:
+      - CHOWN
       - NET_BIND_SERVICE
       - SETUID
       - SETGID
